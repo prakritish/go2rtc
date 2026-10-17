@@ -44,7 +44,16 @@ func (n *Node) AppendChild(child *Node) {
 	n.childs = append(n.childs, child)
 	n.mu.Unlock()
 
+	child.mu.Lock()
 	child.parent = n
+	child.mu.Unlock()
+}
+
+// Parent returns the parent node, it can be changed on producer reconnect (MoveNode)
+func (n *Node) Parent() *Node {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	return n.parent
 }
 
 func (n *Node) RemoveChild(child *Node) {
@@ -83,6 +92,8 @@ func MoveNode(dst, src *Node) {
 	dst.mu.Unlock()
 
 	for _, child := range childs {
+		child.mu.Lock()
 		child.parent = dst
+		child.mu.Unlock()
 	}
 }

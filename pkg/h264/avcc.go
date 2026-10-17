@@ -16,13 +16,22 @@ func RepairAVCC(codec *core.Codec, handler core.HandlerFunc) core.HandlerFunc {
 	ps := JoinNALU(sps, pps)
 
 	return func(packet *rtp.Packet) {
+		// the packet is shared between consumers, so change only the copy (same as h265.RepairAVCC)
+		payload := packet.Payload
+
 		// this can happen for FLV from FFmpeg
-		if NALUType(packet.Payload) == NALUTypeSEI {
-			size := int(binary.BigEndian.Uint32(packet.Payload)) + 4
-			packet.Payload = packet.Payload[size:]
+		if NALUType(payload) == NALUTypeSEI {
+			size := int(binary.BigEndian.Uint32(payload)) + 4
+			payload = payload[size:]
 		}
-		if NALUType(packet.Payload) == NALUTypeIFrame {
-			packet.Payload = Join(ps, packet.Payload)
+		if NALUType(payload) == NALUTypeIFrame {
+			payload = Join(ps, payload)
+		}
+
+		if len(payload) != len(packet.Payload) {
+			clone := *packet
+			clone.Payload = payload
+			packet = &clone
 		}
 		handler(packet)
 	}
