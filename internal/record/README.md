@@ -225,7 +225,14 @@ rtsp://192.168.1.123:8554/camera1_delay
 - When segments roll over, audio keeps its sync with video from the previous segment. Audio usually arrives
   later than video (encoder buffers), so the next segment may start its video with a small lead (up to 2 s)
   to keep the late audio samples in place. The index times are relative to the first keyframe.
-- After a (re)connect, audio is aligned with video by arrival time (RTP timestamps of different tracks are unrelated)
+- Audio is synchronized with video by **RTCP sender reports** (RTSP sources: cameras and RTSP publishers). They map
+  RTP timestamps of each track to the sender wall clock, so the sync doesn't depend on network or encoder delays
+- If the reports come later than the recording starts, the sync is corrected at the next segment boundary
+  (a one-time audio gap or overlap there)
+- Without sender reports (other sources, or the clocks of the reports don't match), audio is aligned with video
+  by arrival time after a (re)connect
+- AAC from RTP keeps the RTP timestamps for this. If a camera sends broken AAC timestamps (they don't follow
+  the audio frames), own timestamps are used and the sender reports are ignored for this track
 
 ## Reliability
 
@@ -247,7 +254,7 @@ rtsp://192.168.1.123:8554/camera1_delay
   resolution), `video.mp4` and `playlist.m3u8` end at the change (`X-Record-Truncated`). The `record:` source
   plays through the change.
 - `format=mp4` and `exact` prepare the whole file before sending, so the response starts after FFmpeg finishes.
-- After a (re)connect, audio is aligned with video by arrival time (RTCP sender reports are not used).
+- A/V sync by RTCP sender reports works for RTSP sources only, other sources are aligned by arrival time.
 - If a clip starts in a segment with an audio lead or late audio samples, its video starts with a small offset
   (`start_time` > 0, usually below 0.6 s) and audio starts at 0.
 - Stereo PCM is recorded as FLAC with a double sample rate (like `stream.mp4`), the `record:` source plays it as mono.

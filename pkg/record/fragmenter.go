@@ -38,6 +38,9 @@ type fragmentTrack struct {
 	end     uint64 // decode time of the end of the last written sample
 	pending *pendingSample
 	broken  bool // timestamps jump on secondary track, skip it till the next segment
+
+	senderReport func() *core.SenderReport // RTCP sender report of the source track (can be nil)
+	synced       bool                      // the track is synchronized with the master by sender reports
 }
 
 type pendingSample struct {
@@ -65,8 +68,36 @@ func (t *fragmentTrack) time(ts uint32) time.Duration {
 	return toDuration(int64(int32(ts-t.first))+t.offset, t.codec.ClockRate)
 }
 
-func (f *fragmenter) addTrack(codec *core.Codec) {
-	f.tracks = append(f.tracks, &fragmentTrack{codec: codec})
+func (f *fragmenter) addTrack(codec *core.Codec, senderReport func() *core.SenderReport) {
+	f.tracks = append(f.tracks, &fragmentTrack{codec: codec, senderReport: senderReport})
+}
+
+// maxClockMismatch - sender reports of the tracks are ignored if their clocks don't match
+const maxClockMismatch = 2 * time.Second
+
+// syncResolution - the carried sync is replaced with the sync by sender reports if they differ more
+const syncResolution = 10 * time.Millisecond
+
+// syncOffset returns first and offset (decode time = int32(ts - first) + offset) of the secondary track,
+// so the track is synchronized with the master keyframe by RTCP sender reports (sender wall clock).
+func (f *fragmenter) syncOffset(track *fragmentTrack, masterTS uint32, lead time.Duration) (uint32, int64, bool) {
+	master := f.tracks[f.master]
+	if !master.codec.IsVideo() || master.senderReport == nil || track.senderReport == nil {
+		return 0, 0, false
+	}
+	msr, tsr := master.senderReport(), track.senderReport()
+	if msr == nil || tsr == nil {
+		return 0, 0, false
+	}
+
+	// both reports should be from the same sender clock (some cameras send wrong NTP time)
+	mismatch := msr.NTP.Sub(msr.Received) - tsr.NTP.Sub(tsr.Received)
+	if mismatch > maxClockMismatch || mismatch < -maxClockMismatch {
+		return 0, 0, false
+	}
+
+	start := msr.Time(masterTS, master.codec.ClockRate) // sender time of the segment start
+	return tsr.RTPTime, toTicks(tsr.NTP.Sub(start)+lead, track.codec.ClockRate), true
 }
 
 // maxLead - max secondary track (audio) delay that is compensated on the segment boundary
@@ -99,18 +130,39 @@ func (f *fragmenter) carryOver(nextTS *uint32) {
 	}
 }
 
-// reset - start new segment at the wall clock time.
-// Secondary tracks keep their sync with the master track if the stream is continuous.
-// Otherwise, their first sample is aligned by the wall clock (arrival time).
-func (f *fragmenter) reset(now time.Time) {
+// reset - start new segment at the wall clock time, masterTS - timestamp of the master keyframe.
+// Secondary tracks are synchronized with the master by RTCP sender reports if possible.
+// Otherwise, they keep their sync with the master track if the stream is continuous,
+// or their first sample is aligned by the wall clock (arrival time).
+func (f *fragmenter) reset(now time.Time, masterTS uint32) {
 	for i, track := range f.tracks {
-		if f.hasCarry && i != f.master && track.started && !track.broken {
+		carried := f.hasCarry && i != f.master && track.started && !track.broken
+		if carried {
 			// new decode time = old decode time - carry + lead (carry includes old offsets)
 			track.first += uint32(toTicks(f.carry, track.codec.ClockRate))
 			track.offset += toTicks(f.lead, track.codec.ClockRate)
-		} else {
+		}
+
+		var lead time.Duration
+		if f.hasCarry {
+			lead = f.lead
+		}
+
+		if i == f.master {
+			track.started = false // starts from the keyframe that opens the segment
+			track.offset = 0
+		} else if first, offset, ok := f.syncOffset(track, masterTS, lead); ok {
+			// keep the carried sync if it's the same (avoid small jumps on every segment)
+			diff := int64(int32(first-track.first)) + track.offset - offset
+			if !carried || !track.synced || toDuration(abs(diff), track.codec.ClockRate) > syncResolution {
+				track.first, track.offset = first, offset
+			}
+			track.started = true
+			track.synced = true
+		} else if !carried {
 			track.started = false
 			track.offset = 0
+			track.synced = false
 		}
 		if i == f.master && f.hasCarry {
 			track.offset = toTicks(f.lead, track.codec.ClockRate)
@@ -124,6 +176,13 @@ func (f *fragmenter) reset(now time.Time) {
 	f.seq = 0
 	f.segWall = now
 	f.hasCarry = false
+}
+
+func abs(v int64) int64 {
+	if v < 0 {
+		return -v
+	}
+	return v
 }
 
 func toDuration(ticks int64, clockRate uint32) time.Duration {
@@ -252,6 +311,8 @@ func (f *fragmenter) write(trackID byte, duration uint32) error {
 	var dts uint64
 	if v := int64(int32(sample.ts-track.first)) + track.offset; v > 0 {
 		dts = uint64(v)
+	} else if v < 0 && track.synced {
+		return nil // the sample is before the segment start (synchronized by sender reports)
 	}
 	if track.end > 0 && dts <= track.lastDts {
 		dts = track.lastDts + 1 // decode time should always increase (track.end > 0 - not first sample)

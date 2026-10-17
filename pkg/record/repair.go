@@ -94,6 +94,13 @@ func RepairSegment(path string) (time.Duration, error) {
 		}
 	}
 
+	// keep the start time correction from the old index (if any)
+	if old, err := ReadIndex(IndexPath(path)); err == nil {
+		if correction := IndexStart(old); correction != 0 {
+			entries = append(entries, IndexEntry{Type: EntryStart, Offset: int64(correction / time.Millisecond)})
+		}
+	}
+
 	duration := time.Duration((masterEnd-firstDts)*1000/timescale) * time.Millisecond
 	entries = append(entries, IndexEntry{Type: EntryEnd, Time: duration, Offset: end})
 

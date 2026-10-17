@@ -8,6 +8,15 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func withoutStart(entries []IndexEntry) (result []IndexEntry) {
+	for _, e := range entries {
+		if e.Type != EntryStart {
+			result = append(result, e)
+		}
+	}
+	return
+}
+
 func TestRepairSegment(t *testing.T) {
 	segments := recordAV(t)
 	seg := segments[1]
@@ -33,7 +42,8 @@ func TestRepairSegment(t *testing.T) {
 
 	entries, err := ReadIndex(IndexPath(seg.Path))
 	require.NoError(t, err)
-	require.Equal(t, expect, entries, "rebuilt index should be the same")
+	// the start correction is lost with the index, other entries are the same
+	require.Equal(t, withoutStart(expect), entries, "rebuilt index should be the same")
 
 	// the repaired segment works in a clip
 	clip, err := NewClip([]Segment{seg}, seg.Start, seg.End())

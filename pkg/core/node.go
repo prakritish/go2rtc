@@ -2,6 +2,8 @@ package core
 
 import (
 	"sync"
+	"sync/atomic"
+	"time"
 
 	"github.com/pion/rtp"
 )
@@ -32,6 +34,32 @@ type Node struct {
 	parent *Node
 
 	mu sync.Mutex
+
+	senderReport atomic.Pointer[SenderReport]
+}
+
+// SenderReport - mapping of the RTP time to the sender wall clock (RTCP sender report).
+// Tracks of one source can be synchronized with it (ex. audio and video).
+type SenderReport struct {
+	NTP      time.Time // sender wall clock
+	RTPTime  uint32    // RTP timestamp for this time
+	Received time.Time // local time when the report was received
+}
+
+// Time returns the sender wall clock time of the RTP timestamp
+func (r *SenderReport) Time(ts uint32, clockRate uint32) time.Time {
+	ticks := int64(int32(ts - r.RTPTime))
+	return r.NTP.Add(time.Duration(ticks) * time.Second / time.Duration(clockRate))
+}
+
+// SetSenderReport - should be called by the producer for the receiver
+func (n *Node) SetSenderReport(sr *SenderReport) {
+	n.senderReport.Store(sr)
+}
+
+// SenderReport returns the last sender report for the receiver (nil if none)
+func (n *Node) SenderReport() *SenderReport {
+	return n.senderReport.Load()
 }
 
 func (n *Node) WithParent(parent *Node) *Node {

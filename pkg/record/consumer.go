@@ -6,7 +6,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/AlexxIT/go2rtc/pkg/aac"
 	"github.com/AlexxIT/go2rtc/pkg/core"
 	"github.com/AlexxIT/go2rtc/pkg/h264"
 	"github.com/AlexxIT/go2rtc/pkg/h265"
@@ -110,12 +109,25 @@ func (c *Consumer) AddTrack(media *core.Media, _ *core.Codec, track *core.Receiv
 		c.handle(trackID, packet)
 	}
 
+	// source timestamps are used (needed for the synchronization by RTCP sender reports)
+	timestampsOK := func() bool { return true }
+
 	switch track.Codec.Name {
 	case core.CodecH264, core.CodecH265:
 		sender.Handler = videoHandler(sender, track.Codec, handler)
 	case core.CodecAAC:
 		if track.Codec.IsRTP() {
-			sender.Handler = aac.RTPDepay(handler)
+			depay := &aacDepay{handler: handler}
+			source := track.Codec
+			sender.Handler = func(packet *rtp.Packet) {
+				// new source track after reconnect: new RTP session with new timestamps
+				if parent := sender.Parent(); parent != nil && parent.Codec != source && parent.Codec != nil {
+					source = parent.Codec
+					depay.reset()
+				}
+				depay.Handle(packet)
+			}
+			timestampsOK = func() bool { return !depay.broken.Load() }
 		} else {
 			sender.Handler = handler
 		}
@@ -149,7 +161,13 @@ func (c *Consumer) AddTrack(media *core.Media, _ *core.Codec, track *core.Receiv
 	muxCodec := codec.Clone()
 	c.muxer.AddTrack(muxCodec) // used only for init segment
 	c.codecs = append(c.codecs, muxCodec)
-	c.fragmenter.addTrack(muxCodec)
+	c.fragmenter.addTrack(muxCodec, func() *core.SenderReport {
+		// the source track (it changes on reconnect)
+		if parent := sender.Parent(); parent != nil && timestampsOK() {
+			return parent.SenderReport()
+		}
+		return nil
+	})
 
 	sender.HandleRTP(track)
 	c.Senders = append(c.Senders, sender)
@@ -407,7 +425,7 @@ func (c *Consumer) openSegment(now time.Time, ts uint32) bool {
 	c.lastTS = ts
 	// keep lastDelta from previous segment as an estimate of the frame duration
 
-	c.fragmenter.reset(now)
+	c.fragmenter.reset(now, ts)
 
 	return true
 }
