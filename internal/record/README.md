@@ -13,6 +13,8 @@ Without transcoding.
 
 ## Configuration
 
+For a production Docker image, Compose file and sample config see [docker/record](../../docker/record/README.md).
+
 ```yaml
 record:
   path: /var/lib/go2rtc/recordings  # default: recordings (relative to working dir)
