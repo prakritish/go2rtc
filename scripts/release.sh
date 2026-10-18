@@ -1,22 +1,23 @@
 #!/usr/bin/env bash
 # Release go2rtc (with the record module):
 #   1. binaries for linux and macOS, amd64 and arm64 -> dist/<version>/
-#   2. macOS binaries signed with the Developer ID Application certificate on the MDM server
-#      (the private key never leaves the server: the binaries go there through S3 and SSM)
+#   2. macOS binaries signed with a Developer ID Application certificate on a signing server
+#      (the private key never leaves the server: the binaries go there through S3 and AWS SSM)
 #   3. multi-arch Docker image (linux/amd64 + linux/arm64) pushed to Docker Hub
 #   4. git tag v<version> pushed to origin
 #
 # usage: scripts/release.sh <version>        ex. scripts/release.sh 1.9.14-rec.1
 #
 # Requirements: go, docker with buildx and arm64 emulation (apt install qemu-user-binfmt),
-# docker login (Docker Hub), aws CLI with SSM and S3 access to the MDM account, a clean git tree.
+# docker login (Docker Hub), a clean git tree, and for signing: aws CLI with SSM and S3 access and
+# scripts/release.env with the signing server settings (copy scripts/release.env.example, it's not in git).
 #
 # Optional environment:
 #   IMAGE=prakritish/go2rtc      Docker image name
 #   LATEST=1                     also tag the image as :latest (default 1, set 0 for test releases)
 #   SKIP_SIGN=1                  don't sign macOS binaries (not for distribution)
 #   NO_PUSH=1                    build everything, push nothing (no image, no git tag)
-#   SIGN_INSTANCE, SIGN_BUCKET, AWS_REGION, BUNDLE_ID - see below
+#   RELEASE_ENV=path             signing settings file (default scripts/release.env)
 set -euo pipefail
 
 VERSION="${1:-}"
@@ -25,13 +26,12 @@ VERSION="${VERSION#v}"
 IMAGE="${IMAGE:-prakritish/go2rtc}"
 LATEST="${LATEST:-1}"
 PLATFORMS="linux/amd64,linux/arm64"
-SIGN_INSTANCE="${SIGN_INSTANCE:-i-057a6e6e158217c5d}"     # MDM server (fleet-mdm-ec2)
-SIGN_BUCKET="${SIGN_BUCKET:-fleet-mdm-backups-pmcddrb4}"  # the server can read and write this bucket
-AWS_REGION="${AWS_REGION:-us-west-2}"
-BUNDLE_ID="${BUNDLE_ID:-ai.hakimo.go2rtc}"
-TEAM_ID="Q2QDG3YXPS"
-
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+
+# signing server settings (see release.env.example), kept out of git
+RELEASE_ENV="${RELEASE_ENV:-$ROOT/scripts/release.env}"
+# shellcheck disable=SC1090
+[[ -f "$RELEASE_ENV" ]] && source "$RELEASE_ENV"
 DIST="$ROOT/dist/$VERSION"
 TAG="v$VERSION"
 
@@ -52,7 +52,12 @@ cd "$ROOT"
 
 for cmd in go git docker; do command -v $cmd >/dev/null || die "$cmd is not installed"; done
 docker buildx version >/dev/null 2>&1 || die "docker buildx is not installed"
-[[ "${SKIP_SIGN:-0}" == 1 ]] || command -v aws >/dev/null || die "aws CLI is not installed (or set SKIP_SIGN=1)"
+if [[ "${SKIP_SIGN:-0}" != 1 ]]; then
+  command -v aws >/dev/null || die "aws CLI is not installed (or set SKIP_SIGN=1)"
+  for v in SIGN_INSTANCE SIGN_BUCKET SIGN_REGION SIGN_KEY SIGN_CERT SIGN_CHAIN SIGN_RCODESIGN BUNDLE_ID TEAM_ID; do
+    [[ -n "${!v:-}" ]] || die "$v is not set: copy scripts/release.env.example to scripts/release.env (or set SKIP_SIGN=1)"
+  done
+fi
 
 [[ -z "$(git status --porcelain)" ]] || die "git tree is not clean, commit or stash the changes"
 
@@ -109,14 +114,12 @@ sign_macos() {
   local script
   script=$(cat <<EOF
 set -eu
-D=/opt/fleet-mdm/nanomdm/certs/signing
-RC=/opt/fleet-mdm/bin/rcodesign
-INTER=/opt/fleet-mdm/controlplane/app/apple_developer_id_g2_ca.pem
-openssl x509 -in \$D/app.pem -noout -checkend 0 >/dev/null || { echo "certificate expired"; exit 1; }
+RC=$SIGN_RCODESIGN
+openssl x509 -in $SIGN_CERT -noout -checkend 0 >/dev/null || { echo "certificate expired"; exit 1; }
 BASE=/dev/shm; [ -w \$BASE ] || BASE=/tmp
 T=\$(mktemp -d \$BASE/g2rsign.XXXXXX); trap 'rm -rf "\$T"' EXIT; chmod 700 \$T
 umask 077
-cat \$D/app.key \$D/app.pem \$INTER > \$T/id.pem
+cat $SIGN_KEY $SIGN_CERT $SIGN_CHAIN > \$T/id.pem
 for f in go2rtc_mac_amd64 go2rtc_mac_arm64; do
   aws s3 cp --quiet $s3/in/\$f \$T/\$f
   \$RC sign --pem-file \$T/id.pem --code-signature-flags runtime --binary-identifier $BUNDLE_ID \$T/\$f \$T/\$f.signed >\$T/log 2>&1 || { cat \$T/log; exit 1; }
@@ -128,18 +131,18 @@ EOF
 )
   local b64 cid status
   b64=$(printf '%s' "$script" | base64 -w0)
-  cid=$(aws ssm send-command --region "$AWS_REGION" --instance-ids "$SIGN_INSTANCE" \
+  cid=$(aws ssm send-command --region "$SIGN_REGION" --instance-ids "$SIGN_INSTANCE" \
     --document-name AWS-RunShellScript --comment "go2rtc $VERSION macOS signing" \
     --parameters "commands=[\"echo $b64 | base64 -d | bash\"]" \
     --query Command.CommandId --output text)
 
   for _ in $(seq 1 60); do
     sleep 3
-    status=$(aws ssm get-command-invocation --region "$AWS_REGION" --command-id "$cid" \
+    status=$(aws ssm get-command-invocation --region "$SIGN_REGION" --command-id "$cid" \
       --instance-id "$SIGN_INSTANCE" --query Status --output text 2>/dev/null || echo Pending)
     case "$status" in Pending|InProgress|Delayed) continue ;; *) break ;; esac
   done
-  aws ssm get-command-invocation --region "$AWS_REGION" --command-id "$cid" --instance-id "$SIGN_INSTANCE" \
+  aws ssm get-command-invocation --region "$SIGN_REGION" --command-id "$cid" --instance-id "$SIGN_INSTANCE" \
     --query '[StandardOutputContent,StandardErrorContent]' --output text | sed '/^\s*$/d; s/^/  /'
   [[ "$status" == Success ]] || die "signing failed on the server (status: $status)"
 
