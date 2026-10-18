@@ -6,7 +6,7 @@ services:
     build:
       context: ../..
       dockerfile: docker/record/Dockerfile
-    image: go2rtc-record:latest
+    image: prakritish/go2rtc:latest   # or build locally with "docker compose up -d --build"
     container_name: go2rtc
     restart: unless-stopped
 

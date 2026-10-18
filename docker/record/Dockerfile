@@ -1,8 +1,8 @@
 # syntax=docker/dockerfile:1
 
 # go2rtc with the record module, for production (NVR) use.
-# Build from the repository root:
-#   docker build -f docker/record/Dockerfile -t go2rtc-record .
+# Build from the repository root (scripts/release.sh builds amd64 + arm64 and pushes):
+#   docker build -f docker/record/Dockerfile --build-arg VERSION=1.9.14 -t prakritish/go2rtc .
 #
 # Differences from docker/Dockerfile: plain Alpine (no Python, ffplay, fonts, Intel drivers),
 # non-root user, a separate /recordings volume and a health check.
@@ -17,8 +17,12 @@ ARG ALPINE_VERSION="3.22"
 FROM --platform=$BUILDPLATFORM golang:${GO_VERSION}-alpine AS build
 ARG TARGETOS
 ARG TARGETARCH
+ARG VERSION=""
 
 WORKDIR /build
+
+# git: go build stamps the version from the git tag (.git is in the build context)
+RUN apk add --no-cache git
 
 # Cache dependencies
 COPY go.mod go.sum ./
@@ -26,7 +30,7 @@ RUN --mount=type=cache,target=/go/pkg/mod go mod download
 
 COPY . .
 RUN --mount=type=cache,target=/go/pkg/mod --mount=type=cache,target=/root/.cache/go-build \
-    CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -ldflags "-s -w" -trimpath -o /go2rtc
+    CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -ldflags "-s -w ${VERSION:+-X main.version=$VERSION}" -trimpath -o /go2rtc
 
 
 # 2. Final image

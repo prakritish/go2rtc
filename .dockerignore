@@ -1,0 +1,6 @@
+# only files that git ignores too, so the git tree in the build stays clean (version stamping)
+/dist/
+/.tmp/
+/.idea/
+docker/record/.env
+docker/record/config/
