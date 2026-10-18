@@ -282,11 +282,13 @@ func Shutdown() {
 	}
 	recordersMu.Unlock()
 
+	// one deadline for all recorders, they stop in parallel
+	timeout := time.After(3 * time.Second)
 	for _, r := range list {
 		if r.exited != nil {
 			select {
 			case <-r.exited:
-			case <-time.After(3 * time.Second):
+			case <-timeout:
 			}
 		}
 		r.mu.Lock()

@@ -223,5 +223,11 @@ func TestSetAttachmentAndMethods(t *testing.T) {
 		req := httptest.NewRequest(http.MethodPost, "/api/record/video.mp4?src=cam1", nil)
 		fn(rec, req)
 		require.Equal(t, http.StatusMethodNotAllowed, rec.Code)
+
+		// CORS preflight
+		rec = httptest.NewRecorder()
+		req = httptest.NewRequest(http.MethodOptions, "/api/record/video.mp4?src=cam1", nil)
+		fn(rec, req)
+		require.Equal(t, http.StatusOK, rec.Code)
 	}
 }

@@ -7,6 +7,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -93,6 +94,8 @@ func apiRecord(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 		}
 
+	case "OPTIONS": // CORS preflight, headers are set by the API middleware
+
 	default:
 		http.Error(w, "", http.StatusMethodNotAllowed)
 	}
@@ -102,8 +105,7 @@ func apiRecord(w http.ResponseWriter, r *http.Request) {
 // GET /api/record/segments?src=cam1[&start=...][&end=...]
 // start and end - RFC3339 time or unix seconds
 func apiSegments(w http.ResponseWriter, r *http.Request) {
-	if r.Method != "GET" {
-		http.Error(w, "", http.StatusMethodNotAllowed)
+	if !allowMethod(w, r, "GET", "HEAD") {
 		return
 	}
 
@@ -132,8 +134,7 @@ func apiSegments(w http.ResponseWriter, r *http.Request) {
 // GET /api/record/segment.mp4?src=cam1&id=2026-10-17/2026-10-17T14-03-00.123Z.mp4
 // Supports HTTP Range requests. The id is looked up in the catalog, so no path traversal.
 func apiSegment(w http.ResponseWriter, r *http.Request) {
-	if r.Method != "GET" && r.Method != "HEAD" {
-		http.Error(w, "", http.StatusMethodNotAllowed)
+	if !allowMethod(w, r, "GET", "HEAD") {
 		return
 	}
 
@@ -156,6 +157,18 @@ func apiSegment(w http.ResponseWriter, r *http.Request) {
 	setAttachment(w, query.Get("filename"))
 
 	http.ServeContent(w, r, "", seg.Start, f)
+}
+
+// allowMethod returns false and answers the request if the method is not allowed.
+// OPTIONS (CORS preflight) is answered with an empty response, headers are set by the API middleware.
+func allowMethod(w http.ResponseWriter, r *http.Request, methods ...string) bool {
+	if slices.Contains(methods, r.Method) {
+		return true
+	}
+	if r.Method != "OPTIONS" {
+		http.Error(w, "", http.StatusMethodNotAllowed)
+	}
+	return false
 }
 
 func setAttachment(w http.ResponseWriter, filename string) {
@@ -204,8 +217,7 @@ func newTimeRange(start, end time.Time) timeRange {
 // apiTimeline - continuous recorded ranges and gaps between them
 // GET /api/record/timeline?src=cam1[&start=...][&end=...]
 func apiTimeline(w http.ResponseWriter, r *http.Request) {
-	if r.Method != "GET" {
-		http.Error(w, "", http.StatusMethodNotAllowed)
+	if !allowMethod(w, r, "GET", "HEAD") {
 		return
 	}
 
@@ -275,8 +287,7 @@ func timeline(segments []record.Segment, from, to time.Time) (ranges, gaps []tim
 // - format=mp4 - regular MP4 (moov at start) via FFmpeg, without transcoding
 // - exact      - start exactly from the requested time (MP4 edit list via FFmpeg, without transcoding)
 func apiVideo(w http.ResponseWriter, r *http.Request) {
-	if r.Method != "GET" && r.Method != "HEAD" {
-		http.Error(w, "", http.StatusMethodNotAllowed)
+	if !allowMethod(w, r, "GET", "HEAD") {
 		return
 	}
 
@@ -550,6 +561,8 @@ func apiEvents(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		notifyEvents(src)
+
+	case "OPTIONS": // CORS preflight, headers are set by the API middleware
 
 	default:
 		http.Error(w, "", http.StatusMethodNotAllowed)

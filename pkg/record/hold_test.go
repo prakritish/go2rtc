@@ -172,7 +172,7 @@ func TestHoldChainedAfterTrim(t *testing.T) {
 func TestHoldBetweenSegments(t *testing.T) {
 	r := newHoldRecorder(t, 4*time.Second, time.Second)
 
-	r.feed(50)           // 2.0s in memory
+	r.feed(50)            // 2.0s in memory
 	r.cons.CloseSegment() // closes active segment into prevMem (c.seg == nil)
 	r.cons.SetHold(false) // event arrives before next keyframe
 	_ = r.cons.Stop()

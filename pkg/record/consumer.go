@@ -490,7 +490,7 @@ func (c *Consumer) closeSegment(nextTS *uint32, chain bool) {
 		c.fail(err)
 	}
 
-	end := seg.info.End()
+	end := seg.info.Start.Add(duration - seg.timeBase) // info.Duration is not set for memory segments
 	c.prevEnd = end
 	if chain && nextTS != nil {
 		c.nextStart = end
