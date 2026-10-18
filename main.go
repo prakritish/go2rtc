@@ -52,9 +52,11 @@ import (
 	"github.com/AlexxIT/go2rtc/pkg/shell"
 )
 
+// version can be set on build: go build -ldflags "-X main.version=1.9.14"
+var version = "1.9.14"
+
 func main() {
-	// version will be set later from -buildvcs info, this used only as fallback
-	app.Version = "1.9.14"
+	app.Version = version
 
 	type module struct {
 		name string

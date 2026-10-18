@@ -13,6 +13,9 @@ FFmpeg is included: `video.mp4?format=mp4` and `&exact` use it (remux, no transc
 sources. The image is ~60 MB compressed. Compared to [docker/Dockerfile](../Dockerfile) it has no Python, ffplay,
 fonts or Intel VAAPI drivers: add `libva-intel-driver intel-media-driver` if you transcode with hardware.
 
+Prebuilt image for linux/amd64 and linux/arm64: `prakritish/go2rtc` (Docker Hub). Releases (binaries for Linux and
+macOS, signed macOS binaries, the image) are built with [scripts/release.sh](../../scripts/release.sh).
+
 ## Quick start
 
 ```bash

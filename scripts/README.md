@@ -2,6 +2,10 @@
 
 This folder contains a script for building binaries for all platforms.
 
+`release.sh <version>` builds a release of this fork: Linux and macOS binaries (amd64, arm64) in `dist/<version>`,
+macOS binaries signed with the Developer ID Application certificate on the MDM server, and the multi-arch
+`prakritish/go2rtc` Docker image (pushed to Docker Hub). See the comments in the script for requirements and options.
+
 The project has no `CGO` dependencies, so building is as simple as possible using the `go build` command.
 
 The project has to use the latest versions of go due to dependencies on third-party go libraries. Such as `pion/webrtc` or `golang.org/x`. Unfortunately, this breaks compatibility with older versions of operating systems.
