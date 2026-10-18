@@ -153,3 +153,30 @@ func TestHoldPrevSegment(t *testing.T) {
 		require.True(t, segs[i].Start.Equal(segs[i-1].End()), "segment %d", i)
 	}
 }
+
+func TestHoldChainedAfterTrim(t *testing.T) {
+	// segment 3s, pre-buffer 0.5s: materialize after trimming >1.5s from active segment,
+	// then roll over to a second disk segment and verify zero gap between segs[0].End() and segs[1].Start
+	r := newHoldRecorder(t, 3*time.Second, 500*time.Millisecond)
+
+	r.feed(50) // 2.0s in memory
+	r.cons.SetHold(false)
+	r.feed(50) // crosses 3s segment boundary and writes into second segment
+	_ = r.cons.Stop()
+
+	segs := r.list(t)
+	require.Len(t, segs, 2)
+	require.True(t, segs[1].Start.Equal(segs[0].End()), "chained segment start (%s) must equal previous end (%s)", segs[1].Start, segs[0].End())
+}
+
+func TestHoldBetweenSegments(t *testing.T) {
+	r := newHoldRecorder(t, 4*time.Second, time.Second)
+
+	r.feed(50)           // 2.0s in memory
+	r.cons.CloseSegment() // closes active segment into prevMem (c.seg == nil)
+	r.cons.SetHold(false) // event arrives before next keyframe
+	_ = r.cons.Stop()
+
+	segs := r.list(t)
+	require.Len(t, segs, 1, "prevMem should be materialized when SetHold(false) is called with c.seg == nil")
+}

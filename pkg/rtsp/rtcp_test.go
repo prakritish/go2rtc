@@ -37,4 +37,11 @@ func TestSenderReport(t *testing.T) {
 
 	// broken RTCP is ignored
 	require.NoError(t, c.handleRawPacket(3, []byte{0x80, 200, 0, 1}))
+
+	// sender report with uninitialized zero NTPTime is ignored
+	zeroSR := &rtcp.SenderReport{SSRC: 1, NTPTime: 0, RTPTime: 999999}
+	bZero, err := zeroSR.Marshal()
+	require.NoError(t, err)
+	require.NoError(t, c.handleRawPacket(3, bZero))
+	require.Equal(t, uint32(123456), receiver.SenderReport().RTPTime)
 }

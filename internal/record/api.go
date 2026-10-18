@@ -2,9 +2,11 @@ package record
 
 import (
 	"errors"
+	"mime"
 	"net/http"
 	"net/url"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -100,6 +102,11 @@ func apiRecord(w http.ResponseWriter, r *http.Request) {
 // GET /api/record/segments?src=cam1[&start=...][&end=...]
 // start and end - RFC3339 time or unix seconds
 func apiSegments(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "GET" {
+		http.Error(w, "", http.StatusMethodNotAllowed)
+		return
+	}
+
 	query := r.URL.Query()
 	src := query.Get("src")
 	if src == "" {
@@ -125,6 +132,11 @@ func apiSegments(w http.ResponseWriter, r *http.Request) {
 // GET /api/record/segment.mp4?src=cam1&id=2026-10-17/2026-10-17T14-03-00.123Z.mp4
 // Supports HTTP Range requests. The id is looked up in the catalog, so no path traversal.
 func apiSegment(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "GET" && r.Method != "HEAD" {
+		http.Error(w, "", http.StatusMethodNotAllowed)
+		return
+	}
+
 	query := r.URL.Query()
 
 	seg := cat.get(query.Get("src"), query.Get("id"))
@@ -141,11 +153,17 @@ func apiSegment(w http.ResponseWriter, r *http.Request) {
 	defer f.Close()
 
 	w.Header().Set("Content-Type", "video/mp4")
-	if filename := query.Get("filename"); filename != "" {
-		w.Header().Set("Content-Disposition", `attachment; filename="`+filename+`"`)
-	}
+	setAttachment(w, query.Get("filename"))
 
 	http.ServeContent(w, r, "", seg.Start, f)
+}
+
+func setAttachment(w http.ResponseWriter, filename string) {
+	if filename = filepath.Base(strings.TrimSpace(filename)); filename != "" && filename != "." && filename != "/" {
+		if cd := mime.FormatMediaType("attachment", map[string]string{"filename": filename}); cd != "" {
+			w.Header().Set("Content-Disposition", cd)
+		}
+	}
 }
 
 // parseTime - RFC3339 time, unix seconds, "now" or seconds relative to now ("-60")
@@ -186,6 +204,11 @@ func newTimeRange(start, end time.Time) timeRange {
 // apiTimeline - continuous recorded ranges and gaps between them
 // GET /api/record/timeline?src=cam1[&start=...][&end=...]
 func apiTimeline(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "GET" {
+		http.Error(w, "", http.StatusMethodNotAllowed)
+		return
+	}
+
 	query := r.URL.Query()
 	src := query.Get("src")
 	if src == "" {
@@ -252,6 +275,11 @@ func timeline(segments []record.Segment, from, to time.Time) (ranges, gaps []tim
 // - format=mp4 - regular MP4 (moov at start) via FFmpeg, without transcoding
 // - exact      - start exactly from the requested time (MP4 edit list via FFmpeg, without transcoding)
 func apiVideo(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "GET" && r.Method != "HEAD" {
+		http.Error(w, "", http.StatusMethodNotAllowed)
+		return
+	}
+
 	query := r.URL.Query()
 
 	src, from, to, err := parseRange(query)
@@ -280,9 +308,7 @@ func apiVideo(w http.ResponseWriter, r *http.Request) {
 	if clip.Truncated {
 		header.Set("X-Record-Truncated", "codec change")
 	}
-	if filename := query.Get("filename"); filename != "" {
-		header.Set("Content-Disposition", `attachment; filename="`+filename+`"`)
-	}
+	setAttachment(w, query.Get("filename"))
 
 	if query.Has("exact") || query.Get("format") == "mp4" {
 		var skip time.Duration
@@ -387,9 +413,20 @@ func getClip(src string, from, to time.Time, useCache bool) (*record.Clip, error
 		clipCacheMu.Unlock()
 		return v.clip, nil
 	}
+	var prevStart time.Time
+	if v := clipCache[key]; v != nil {
+		prevStart = v.clip.Start
+	}
 	clipCacheMu.Unlock()
 
-	clip, err := record.NewClip(cat.list(src, from, to), from, to)
+	buildFrom := from
+	// keep the same start keyframe across HLS live reloads even if the first segment closed
+	// and had its start time adjusted
+	if !prevStart.IsZero() {
+		buildFrom = prevStart
+	}
+
+	clip, err := record.NewClip(cat.list(src, buildFrom, to), buildFrom, to)
 	if err != nil {
 		return nil, err
 	}

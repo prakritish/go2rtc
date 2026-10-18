@@ -24,6 +24,7 @@ type recorder struct {
 	medias []*core.Media
 
 	done     chan struct{}
+	exited   chan struct{}
 	stopOnce sync.Once
 
 	mu    sync.Mutex
@@ -49,6 +50,9 @@ func (r *recorder) stopped() bool {
 }
 
 func (r *recorder) run() {
+	if r.exited != nil {
+		defer close(r.exited)
+	}
 	log.Info().Msgf("[record] start stream=%s", r.name)
 
 	for retry := 0; ; retry++ {
@@ -94,6 +98,10 @@ func (r *recorder) record() error {
 
 	if err := stream.AddConsumer(cons); err != nil {
 		return err
+	}
+	if r.stopped() {
+		stream.RemoveConsumer(cons)
+		return nil
 	}
 
 	cons.Start()
