@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"testing"
 
+	"github.com/AlexxIT/go2rtc/pkg/core"
 	"github.com/stretchr/testify/require"
 )
 
@@ -107,4 +108,32 @@ func TestAVCCToCodec(t *testing.T) {
 	b, _ := hex.DecodeString(s)
 	codec := AVCCToCodec(b)
 	require.Equal(t, "packetization-mode=1;profile-level-id=64001f;sprop-parameter-sets=Z2QAH6wkhAFAFuwEQAAAAwBAAAAMI8YMkg==,aO4yyLA=", codec.FmtpLine)
+}
+
+func TestRepairAVCC(t *testing.T) {
+	sps := []byte{NALUTypeSPS, 0x64, 0x00, 0x1f}
+	pps := []byte{NALUTypePPS, 0xee, 0x3c, 0xb0}
+	codec := AVCCToCodec(JoinNALU(sps, pps))
+
+	var got []*core.Packet
+	repair := RepairAVCC(codec, func(packet *core.Packet) {
+		got = append(got, packet)
+	})
+
+	// SEI-only packet should be ignored without panicking
+	seiOnly := &core.Packet{Payload: JoinNALU([]byte{NALUTypeSEI, 1, 2, 3})}
+	repair(seiOnly)
+	require.Empty(t, got)
+
+	// SEI followed by IFrame where stripped SEI size equals prepended SPS+PPS size (16 bytes)
+	sei := []byte{NALUTypeSEI, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11} // 12 + 4 = 16 bytes
+	iframe := []byte{NALUTypeIFrame, 0x88, 0x01, 0x02}
+	origPayload := JoinNALU(sei, iframe)
+	origSnapshot := append([]byte(nil), origPayload...)
+	pkt := &core.Packet{Payload: origPayload}
+
+	repair(pkt)
+	require.Len(t, got, 1)
+	require.Equal(t, origSnapshot, pkt.Payload, "original shared packet must not be mutated")
+	require.Equal(t, JoinNALU(sps, pps, iframe), got[0].Payload)
 }

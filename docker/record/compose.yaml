@@ -1,0 +1,53 @@
+# docker compose -f docker/record/compose.yaml up -d --build
+# Secrets: put them in docker/record/.env (next to this file, not in git), see .env.example
+
+services:
+  go2rtc:
+    build:
+      context: ../..
+      dockerfile: docker/record/Dockerfile
+    image: go2rtc-record:latest
+    container_name: go2rtc
+    restart: unless-stopped
+
+    # host network: WebRTC and camera discovery work without port mapping (Linux only).
+    # For bridge network remove this line and uncomment "ports".
+    network_mode: host
+    # ports:
+    #   - "1984:1984"
+    #   - "8554:8554"
+    #   - "8555:8555/tcp"
+    #   - "8555:8555/udp"
+
+    # the image runs as uid 1000, host directories must be writable by it:
+    #   sudo chown -R 1000:1000 ./config /srv/recordings
+    volumes:
+      - ./config:/config
+      - /srv/recordings:/recordings
+
+    environment:
+      TZ: ${TZ:-UTC}
+      GO2RTC_API_USER: ${GO2RTC_API_USER:-admin}
+      GO2RTC_API_PASS: ${GO2RTC_API_PASS:?set GO2RTC_API_PASS in .env}
+      GO2RTC_RTSP_USER: ${GO2RTC_RTSP_USER:-viewer}
+      GO2RTC_RTSP_PASS: ${GO2RTC_RTSP_PASS:?set GO2RTC_RTSP_PASS in .env}
+      GO2RTC_PUBLIC_IP: ${GO2RTC_PUBLIC_IP:-127.0.0.1}
+      CAM_USER: ${CAM_USER:-admin}
+      CAM_FRONT_DOOR_PASS: ${CAM_FRONT_DOOR_PASS:-}
+      CAM_PARKING_PASS: ${CAM_PARKING_PASS:-}
+      CAM_BACKYARD_PASS: ${CAM_BACKYARD_PASS:-}
+
+    # time to close open segments on stop (default 10s is usually enough)
+    stop_grace_period: 30s
+
+    # memory: about 2 x pre x bitrate per camera in events mode + clip/HLS buffers
+    deploy:
+      resources:
+        limits:
+          memory: 1g
+
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "5"

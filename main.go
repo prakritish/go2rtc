@@ -33,6 +33,7 @@ import (
 	"github.com/AlexxIT/go2rtc/internal/ngrok"
 	"github.com/AlexxIT/go2rtc/internal/onvif"
 	"github.com/AlexxIT/go2rtc/internal/pinggy"
+	"github.com/AlexxIT/go2rtc/internal/record"
 	"github.com/AlexxIT/go2rtc/internal/ring"
 	"github.com/AlexxIT/go2rtc/internal/roborock"
 	"github.com/AlexxIT/go2rtc/internal/rtmp"
@@ -70,9 +71,10 @@ func main() {
 		{"rtsp", rtsp.Init},     // rtsp source, RTSP server
 		{"webrtc", webrtc.Init}, // webrtc source, WebRTC server
 		// Main API
-		{"mp4", mp4.Init},     // MP4 API
-		{"hls", hls.Init},     // HLS API
-		{"mjpeg", mjpeg.Init}, // MJPEG API
+		{"mp4", mp4.Init},       // MP4 API
+		{"hls", hls.Init},       // HLS API
+		{"mjpeg", mjpeg.Init},   // MJPEG API
+		{"record", record.Init}, // Recording and playback API
 		// Other sources and servers
 		{"hass", hass.Init},             // hass source, Hass API server
 		{"homekit", homekit.Init},       // homekit source, HomeKit server
@@ -122,4 +124,6 @@ func main() {
 	}
 
 	shell.RunUntilSignal()
+
+	record.Shutdown() // close open segments
 }

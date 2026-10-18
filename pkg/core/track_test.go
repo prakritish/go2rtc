@@ -1,6 +1,7 @@
 package core
 
 import (
+	"sync/atomic"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -50,4 +51,37 @@ func TestSenser(t *testing.T) {
 		ok = false
 	}
 	require.False(t, ok)
+}
+
+// TestReceiverChilds: childs are changed while the receiver writes packets (run with -race),
+// the receiver doesn't allocate per packet
+func TestReceiverChilds(t *testing.T) {
+	recv := NewReceiver(nil, &Codec{})
+
+	var n atomic.Int32
+	newChild := func() *Node {
+		return &Node{Input: func(*Packet) { n.Add(1) }}
+	}
+	recv.AppendChild(newChild())
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for i := 0; i < 1000; i++ {
+			child := newChild()
+			recv.AppendChild(child)
+			recv.RemoveChild(child)
+		}
+	}()
+	for i := 0; i < 1000; i++ {
+		recv.Input(&Packet{})
+	}
+	<-done
+
+	require.Len(t, recv.childList(), 1)
+	require.GreaterOrEqual(t, n.Load(), int32(1000))
+
+	packet := &Packet{}
+	allocs := testing.AllocsPerRun(100, func() { recv.Input(packet) })
+	require.Zero(t, allocs)
 }

@@ -14,6 +14,7 @@ import (
 
 	"github.com/AlexxIT/go2rtc/pkg/core"
 	"github.com/AlexxIT/go2rtc/pkg/tcp"
+	"github.com/pion/rtcp"
 	"github.com/pion/rtp"
 )
 
@@ -306,16 +307,44 @@ func (c *Conn) handleRawPacket(channel byte, buf []byte) error {
 			return nil
 		}
 
-		//var err error
-		//msg.Packets, err = rtcp.Unmarshal(buf)
-		//if err != nil {
-		//	return nil
-		//}
+		// sender report: RTP time to wall clock mapping for A/V sync (RTCP channel = RTP channel + 1)
+		if msg.Header.Type == rtcp.TypeSenderReport {
+			if packets, err := rtcp.Unmarshal(buf); err == nil {
+				msg.Packets = packets
+				for _, packet := range packets {
+					if sr, ok := packet.(*rtcp.SenderReport); ok {
+						c.handleSenderReport(channel-1, sr)
+					}
+				}
+			}
+		}
 
 		c.Fire(msg)
 	}
 
 	return nil
+}
+
+func (c *Conn) handleSenderReport(channel byte, sr *rtcp.SenderReport) {
+	if sr.NTPTime == 0 {
+		return
+	}
+	for _, receiver := range c.Receivers {
+		if receiver.ID == channel {
+			receiver.SetSenderReport(&core.SenderReport{
+				NTP: ntpTime(sr.NTPTime), RTPTime: sr.RTPTime, Received: time.Now(),
+			})
+			return
+		}
+	}
+}
+
+// ntpTime converts 64 bit NTP timestamp to time
+func ntpTime(ntp uint64) time.Time {
+	const ntpEpochOffset = 2208988800 // seconds from 1900 to 1970
+	sec := int64(ntp>>32) - ntpEpochOffset
+	frac := int64(ntp&0xFFFFFFFF) * 1e9 >> 32
+	return time.Unix(sec, frac)
 }
 
 func (c *Conn) WriteRequest(req *tcp.Request) error {
