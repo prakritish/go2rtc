@@ -1,0 +1,2205 @@
+openapi: 3.1.0
+
+info:
+  title: go2rtc API
+  version: 1.9.14-rec.1
+  license: { name: MIT, url: https://opensource.org/licenses/MIT }
+  contact: { name: go2rtc with recording, url: https://github.com/prakritish/go2rtc }
+  description: |
+    go2rtc connects to cameras (RTSP, RTMP, HTTP, ONVIF, HomeKit and many more) and gives the video to browsers,
+    apps and other tools in many formats (WebRTC, MSE, HLS, MP4, MJPEG, RTSP...). This build can also
+    **record** the cameras to disk and play the recordings back.
+
+    ### Basics
+    - All API addresses start with `/api`. The WebUI is at `/`.
+    - A **stream** is a named camera from the `streams:` section of the config (for example `camera1`).
+      Most endpoints take the stream name in the `src` parameter.
+    - Errors are plain text with a short message (for example `stream not found`).
+    - Video endpoints keep the connection open and send video until you close it.
+
+    ### Login
+    If `api: username:` is set in the config, every request (also the WebUI and this page) needs
+    **HTTP Basic auth** with that user and password. Wrong or missing login gives `401`.
+    Requests from the same machine (`127.0.0.1`) don't need it, unless `api: local_auth: true` is set.
+
+    ### Times (recording API)
+    Times can be written as:
+    - RFC3339: `2026-10-17T14:00:00Z` or `2026-10-17T19:30:00+05:30`
+    - unix seconds: `1792245600` or `1792245600.5`
+    - `now`
+    - seconds before now: `-60` (one minute ago)
+
+    Durations: seconds (`300`, `12.5`) or Go style (`5m`, `1h30m`).
+
+    ### Config changes
+    Some endpoints **save to the config file** (noted in their description). `/api/config` changes need a
+    restart (`POST /api/restart`) to take effect.
+
+servers:
+  - url: ../
+    description: This go2rtc server
+
+security:
+  - basicAuth: [ ]
+
+tags:
+  - name: Application
+    description: Version, restart, logs.
+  - name: Config
+    description: Read and change the config file.
+  - name: Streams
+    description: Add, change and remove cameras (streams), and see who is connected.
+  - name: Live video
+    description: Watch a stream live in many formats.
+  - name: Snapshot
+    description: One picture from a stream.
+  - name: Send video
+    description: Push video or audio into a stream (for example to a camera speaker).
+  - name: Recording
+    description: |
+      Recording to disk and playback. Configure it in the `record:` section of the config.
+      The `src` parameter is the stream name, it must be recorded (`record: streams:`).
+  - name: WebSocket
+    description: The WebSocket API used by the WebUI player.
+  - name: WebTorrent
+    description: Share a stream over the internet without opening ports.
+  - name: Discovery
+    description: |
+      Find cameras and devices. These endpoints return a list of ready-to-use source URLs:
+      copy a `url` into the `streams:` config (or `PUT /api/streams`). An empty result is `404 no sources`.
+  - name: HomeKit
+    description: Apple HomeKit cameras and the go2rtc HomeKit server.
+  - name: ONVIF
+    description: The built-in ONVIF server (go2rtc pretends to be an ONVIF camera for NVRs).
+  - name: Home Assistant
+    description: Routes for the Home Assistant RTSPtoWebRTC integration.
+  - name: Debug
+    description: For troubleshooting.
+
+components:
+  securitySchemes:
+    basicAuth:
+      type: http
+      scheme: basic
+      description: "User and password from `api: username:` / `password:` in the config."
+
+  parameters:
+    src:
+      name: src
+      in: query
+      description: Stream name (from `streams:` in the config).
+      required: true
+      schema: { type: string }
+      example: camera1
+
+    src_or_url:
+      name: src
+      in: query
+      description: |
+        Stream name, **or** a camera URL (for example `rtsp://user:pass@192.168.1.10/stream1`).
+        With a URL a temporary stream is created (not saved to the config).
+      required: true
+      schema: { type: string }
+      example: camera1
+
+    new_name:
+      name: name
+      in: query
+      description: Name for the temporary stream when `src` is a URL. Default is the URL itself.
+      schema: { type: string }
+
+    dst:
+      name: dst
+      in: query
+      description: Name of an existing stream to send to.
+      required: true
+      schema: { type: string }
+      example: camera1
+
+    mp4_filter:
+      name: mp4
+      in: query
+      description: |
+        Codec set for MP4/HLS:
+        - empty (`mp4`) - H264, H265, AAC
+        - `flac` - also PCM audio (G.711 etc.), converted to FLAC
+        - `all` - also Opus and MP3
+      schema: { type: string, enum: [ "", flac, all ] }
+      allowEmptyValue: true
+
+    video_filter:
+      name: video
+      in: query
+      description: |
+        Video codecs to use. Empty (`video`) = any codec, or a list like `h264,h265`.
+        Used only when `mp4` is not given.
+      schema: { type: string }
+      allowEmptyValue: true
+      example: h264,h265
+
+    audio_filter:
+      name: audio
+      in: query
+      description: |
+        Audio codecs to use. Empty (`audio`) = any codec, or a list like `aac,opus`.
+        Used only when `mp4` is not given.
+      schema: { type: string }
+      allowEmptyValue: true
+      example: aac
+
+    filename:
+      name: filename
+      in: query
+      description: Download as a file with this name (the browser saves it instead of playing it).
+      schema: { type: string }
+      example: camera1.mp4
+
+    hls_id:
+      name: id
+      in: query
+      description: HLS session ID (from the playlist).
+      required: true
+      schema: { type: string }
+      example: DvmHdd9w
+
+    hls_n:
+      name: "n"
+      in: query
+      description: Segment number. Used by players only, the server ignores it.
+      schema: { type: integer }
+
+    record_src:
+      name: src
+      in: query
+      description: Stream name.
+      required: true
+      schema: { type: string }
+      example: camera1
+
+    record_start:
+      name: start
+      in: query
+      description: |
+        Start of the time range (needed unless `event` is given).
+        RFC3339 (`2026-10-17T14:00:00Z`), unix seconds, `now`, or seconds before now (`-60`).
+      schema: { type: string }
+      example: "-120"
+
+    record_end:
+      name: end
+      in: query
+      description: End of the time range. Give `end` **or** `duration`. Same formats as `start`.
+      schema: { type: string }
+
+    record_duration:
+      name: duration
+      in: query
+      description: Length of the time range from `start`, in seconds (`300`) or as a duration (`5m`). Instead of `end`.
+      schema: { type: string }
+      example: "60"
+
+    record_event:
+      name: event
+      in: query
+      description: Event ID. Plays the event plus the `pre` and `post` time. Use it instead of `start`/`end`/`duration`.
+      schema: { type: string }
+
+    record_start_optional:
+      name: start
+      in: query
+      description: From this time (optional). RFC3339, unix seconds, `now` or seconds before now (`-3600`).
+      schema: { type: string }
+      example: "-3600"
+
+    record_end_optional:
+      name: end
+      in: query
+      description: Until this time (optional). Same formats as `start`.
+      schema: { type: string }
+
+    record_event_id:
+      name: id
+      in: query
+      description: Event ID (from the create answer or the event list).
+      required: true
+      schema: { type: string }
+      example: K3vZ8pQ2aB
+
+  responses:
+    StreamNotFound:
+      description: No stream with this name (or the camera URL is not supported).
+      content: { text/plain: { example: "stream not found" } }
+    BadRequest:
+      description: A parameter is missing or wrong. The text says what is wrong.
+      content: { text/plain: { example: "src is required" } }
+    Sources:
+      description: Found sources.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Sources" }
+    NoSources:
+      description: Nothing was found.
+      content: { text/plain: { example: "no sources" } }
+
+  schemas:
+    AppInfo:
+      type: object
+      properties:
+        version: { type: string, description: go2rtc version, example: 1.9.14-rec.1 }
+        revision: { type: string, description: Git commit of the build, example: 284c782 }
+        config_path: { type: string, description: Path of the config file, example: /config/go2rtc.yaml }
+        host: { type: string, description: The address you used to reach the server, example: "192.168.1.123:1984" }
+        rtsp:
+          type: object
+          description: RTSP server settings (only if the RTSP server is on).
+          properties:
+            listen: { type: string, example: ":8554" }
+            default_query: { type: string, description: Tracks given to RTSP clients by default, example: "video&audio" }
+
+    Streams:
+      type: object
+      description: All streams, by name.
+      additionalProperties: { $ref: "#/components/schemas/Stream" }
+      example:
+        camera1:
+          producers: [ { url: "rtsp://user:***@192.168.1.10/stream1" } ]
+          consumers: null
+
+    Stream:
+      type: object
+      properties:
+        producers:
+          description: |
+            Sources of the stream (usually the camera). A source that is not connected right now
+            shows only its `url`, a connected one shows the full connection info.
+          type: [ array, "null" ]
+          items: { $ref: "#/components/schemas/Connection" }
+        consumers:
+          description: Who is watching or recording the stream right now.
+          type: [ array, "null" ]
+          items: { $ref: "#/components/schemas/Connection" }
+
+    Connection:
+      type: object
+      description: One connection (a camera or a viewer). Fields that have no value are left out.
+      properties:
+        id: { type: integer }
+        format_name: { type: string, description: "Format, for example `rtsp`, `webrtc`, `mse/fmp4`, `record`", example: rtsp }
+        protocol: { type: string, description: "`tcp`, `udp`, `http`, `ws`...", example: tcp }
+        remote_addr: { type: string, description: Address of the other side, example: "192.168.1.10:554" }
+        source: { type: string }
+        url: { type: string, description: Source URL (passwords are hidden) }
+        user_agent: { type: string, description: Browser or app of the viewer }
+        sdp: { type: string }
+        medias: { type: array, items: { type: string }, example: [ "video, recvonly, H264", "audio, recvonly, MPEG4-GENERIC/16000" ] }
+        receivers:
+          description: Incoming tracks.
+          type: array
+          items: { $ref: "#/components/schemas/Track" }
+        senders:
+          description: Outgoing tracks.
+          type: array
+          items: { $ref: "#/components/schemas/Track" }
+        bytes_recv: { type: integer, description: Bytes received }
+        bytes_send: { type: integer, description: Bytes sent }
+
+    Track:
+      type: object
+      properties:
+        id: { type: integer }
+        codec: { $ref: "#/components/schemas/Codec" }
+        childs: { type: array, items: { type: integer }, description: IDs of the senders that get this track }
+        parent: { type: integer, description: ID of the receiver this track comes from }
+        bytes: { type: integer }
+        packets: { type: integer }
+        drops: { type: integer, description: Packets dropped because the viewer was too slow }
+
+    Codec:
+      type: object
+      properties:
+        codec_name: { type: string, example: h264 }
+        codec_type: { type: string, enum: [ video, audio ] }
+        profile: { type: string, example: High }
+        level: { type: integer, example: 41 }
+        sample_rate: { type: integer, example: 16000 }
+        channels: { type: integer, example: 1 }
+
+    Preload:
+      type: object
+      description: Streams that are kept connected all the time, by name.
+      additionalProperties:
+        type: object
+        properties:
+          consumer: { $ref: "#/components/schemas/Connection" }
+          query: { type: string, example: "video&audio" }
+
+    Source:
+      type: object
+      description: One found source. Copy `url` into the `streams:` config.
+      properties:
+        name: { type: string, description: Device or camera name }
+        info: { type: string, description: "Extra details (model, formats, resolutions...)" }
+        url: { type: string, description: Source URL for go2rtc }
+        location: { type: string, description: Extra location info (for example the stream that already uses it) }
+
+    Sources:
+      type: object
+      properties:
+        sources:
+          type: array
+          items: { $ref: "#/components/schemas/Source" }
+      example:
+        sources: [ { name: "Front door", info: "Model X", url: "onvif://user:pass@192.168.1.20:80" } ]
+
+    SDP:
+      type: object
+      properties:
+        type: { type: string, enum: [ offer, answer ] }
+        sdp: { type: string, description: SDP text }
+
+    RecordStatus:
+      type: object
+      properties:
+        path: { type: string, description: Folder with the recordings, example: /recordings }
+        segment: { type: number, description: Segment length in seconds, example: 60 }
+        retention: { type: number, description: Recordings older than this (seconds) are deleted, example: 604800 }
+        max_size: { type: integer, description: When all recordings together are bigger (bytes) the oldest are deleted, example: 214748364800 }
+        total_size: { type: integer, description: Disk used by all recordings (bytes) }
+        sizes:
+          type: object
+          description: Disk used per stream (bytes).
+          additionalProperties: { type: integer }
+          example: { camera1: 736245, camera2: 1234551 }
+        streams:
+          type: object
+          description: Recorders by stream name.
+          additionalProperties: { $ref: "#/components/schemas/Recorder" }
+
+    Recorder:
+      type: object
+      properties:
+        query: { type: string, description: What is recorded, example: "video&audio" }
+        mode: { type: string, enum: [ continuous, events ] }
+        state: { type: string, enum: [ connecting, recording, error ] }
+        holding: { type: boolean, description: "`events` mode: true while there is no event (video is kept only in memory)" }
+        since: { type: string, format: date-time, description: When the current state started }
+        error: { type: string, description: "Last error (when `state` is `error`)" }
+        last_packet: { type: string, format: date-time, description: When the last data came from the camera }
+        segment: { $ref: "#/components/schemas/RecordSegment" }
+
+    RecordSegment:
+      type: object
+      description: One recorded file (usually 1 minute).
+      properties:
+        id: { type: string, description: "Segment ID (use it with `segment.mp4`)", example: 2026-10-17/2026-10-17T14-03-00.123Z.mp4 }
+        start: { type: string, format: date-time, example: "2026-10-17T14:03:00.123Z" }
+        end: { type: string, format: date-time, example: "2026-10-17T14:04:00.123Z" }
+        duration: { type: number, description: Seconds, example: 60 }
+        size: { type: integer, description: File size in bytes, example: 31457280 }
+        codecs: { type: string, description: Codecs (as for a browser), example: "avc1.640029,mp4a.40.2" }
+        recording: { type: boolean, description: True for the file that is being written right now }
+
+    TimeRange:
+      type: object
+      properties:
+        start: { type: string, format: date-time }
+        end: { type: string, format: date-time }
+        duration: { type: number, description: Seconds }
+      example: { start: "2026-10-17T14:00:00.123Z", end: "2026-10-17T15:30:00.456Z", duration: 5400.333 }
+
+    RecordEvent:
+      type: object
+      properties:
+        id: { type: string, example: K3vZ8pQ2aB }
+        start: { type: string, format: date-time, example: "2026-10-17T14:00:00Z" }
+        end: { type: string, format: date-time, description: Missing while the event is in progress, example: "2026-10-17T14:00:30Z" }
+        label: { type: string, example: motion }
+
+paths:
+  # ---------------------------------------------------------------- Application
+
+  /api:
+    get:
+      summary: Version and server info
+      description: Returns the go2rtc version, the config file path and the RTSP settings. Good for a health check.
+      tags: [ Application ]
+      operationId: appInfo
+      responses:
+        "200":
+          description: Server info.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AppInfo" }
+        "401": { description: Login needed. }
+
+  /api/restart:
+    post:
+      summary: Restart go2rtc
+      description: Restarts go2rtc in place (same process ID), for example after a config change. All connections and recordings restart.
+      tags: [ Application ]
+      operationId: appRestart
+      responses:
+        "200": { description: Restart is starting. }
+        "400": { description: Only POST is allowed. }
+
+  /api/exit:
+    post:
+      summary: Stop go2rtc
+      description: |
+        Stops go2rtc right away with the exit `code`. No answer is sent (the connection just closes).
+        With systemd or Docker `restart` it is started again.
+      tags: [ Application ]
+      operationId: appExit
+      parameters:
+        - name: code
+          in: query
+          description: Exit code, 0 to 125.
+          required: true
+          schema: { type: integer, minimum: 0, maximum: 125 }
+          example: 0
+      responses:
+        "400": { description: "Wrong method, or `code` is missing or not 0-125." }
+
+  /api/log:
+    get:
+      summary: Recent log lines
+      description: |
+        Returns the latest log lines kept in memory (about 1 MB), one JSON object per line.
+        Passwords are hidden.
+      tags: [ Application ]
+      operationId: logGet
+      responses:
+        "200":
+          description: Log lines.
+          content:
+            application/jsonlines:
+              example: |
+                {"level":"info","version":"1.9.14-rec.1","platform":"linux/amd64","revision":"284c782","time":1792245600000,"message":"go2rtc"}
+                {"level":"info","stream":"camera1","time":1792245601000,"message":"[record] start"}
+    delete:
+      summary: Clear the log
+      tags: [ Application ]
+      operationId: logClear
+      responses:
+        "200": { description: Cleared., content: { text/plain: { example: OK } } }
+
+  # ---------------------------------------------------------------- Config
+
+  /api/config:
+    get:
+      summary: Read the config file
+      description: Returns the config file as it is on disk (`${VAR}` placeholders are not replaced).
+      tags: [ Config ]
+      operationId: configGet
+      responses:
+        "200":
+          description: Config file.
+          content: { application/yaml: { example: "streams:\n  camera1: rtsp://...\n" } }
+        "404": { description: The config file can't be read. }
+        "410": { description: go2rtc was started without a config file. }
+    post:
+      summary: Replace the config file
+      description: |
+        Replaces the **whole** config file with the body (YAML). The body is checked to be valid YAML first.
+        Changes take effect after `POST /api/restart`.
+      tags: [ Config ]
+      operationId: configReplace
+      requestBody:
+        required: true
+        content:
+          application/yaml:
+            schema: { type: string }
+            example: "streams:\n  camera1: rtsp://user:pass@192.168.1.10/stream1\n"
+      responses:
+        "200": { description: Saved. }
+        "400": { description: The body could not be read. }
+        "410": { description: go2rtc was started without a config file. }
+        "500": { description: "Not valid YAML, or the file could not be written." }
+    patch:
+      summary: Change part of the config file
+      description: |
+        Merges the body (YAML) into the config file: sections are merged, values and lists are replaced.
+        Comments and formatting of the file are lost. Changes take effect after `POST /api/restart`.
+
+        Example body: `log: {level: debug}` changes only the log level.
+      tags: [ Config ]
+      operationId: configMerge
+      requestBody:
+        required: true
+        content:
+          application/yaml:
+            schema: { type: string }
+            example: "log:\n  level: debug\n"
+      responses:
+        "200": { description: Saved. }
+        "400": { description: The file or the body is not valid YAML. }
+        "410": { description: go2rtc was started without a config file. }
+        "500": { description: The file could not be written. }
+
+  # ---------------------------------------------------------------- Streams
+
+  /api/streams:
+    get:
+      summary: List streams, or show one stream
+      description: |
+        - Without `src` - all streams with their sources and viewers.
+        - With `src` - one stream.
+        - With `src` and `video`/`audio`/`microphone` - connects to the camera first and shows which codecs it
+          really has (a quick probe), then disconnects.
+
+        Passwords in URLs are hidden.
+      tags: [ Streams ]
+      operationId: streamsGet
+      parameters:
+        - name: src
+          in: query
+          description: Stream name. Leave out to list all streams.
+          schema: { type: string }
+          example: camera1
+        - name: video
+          in: query
+          description: Probe the video codecs (empty = any).
+          schema: { type: string }
+          allowEmptyValue: true
+        - name: audio
+          in: query
+          description: Probe the audio codecs (empty = any).
+          schema: { type: string }
+          allowEmptyValue: true
+        - name: microphone
+          in: query
+          description: Probe the codecs the camera speaker accepts (two-way audio).
+          schema: { type: string }
+          allowEmptyValue: true
+      responses:
+        "200":
+          description: All streams (map by name), or one stream.
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: "#/components/schemas/Streams"
+                  - $ref: "#/components/schemas/Stream"
+        "404": { description: No stream with this name. }
+        "500": { description: The probe failed (camera offline or no matching codecs). }
+    put:
+      summary: Add or replace a stream (saved to config)
+      description: |
+        Creates the stream `name` with the source `src`, or replaces it if it exists, and **saves it to the config file**.
+        Repeat `src` to give several sources for one stream (for example a camera and an FFmpeg transcode).
+
+        Example: `PUT /api/streams?name=camera6&src=rtsp://user:pass@192.168.1.16/stream1`
+      tags: [ Streams ]
+      operationId: streamsPut
+      parameters:
+        - name: src
+          in: query
+          description: Source URL. Repeat for several sources.
+          required: true
+          schema: { type: string }
+          example: rtsp://user:pass@192.168.1.16/stream1
+        - name: name
+          in: query
+          description: Stream name. Default is the first `src`.
+          schema: { type: string }
+          example: camera6
+      responses:
+        "200": { description: Stream created and saved. }
+        "400": { description: "Unsupported source type, a source that is not allowed from the API (`exec:`, `echo:`) or has spaces, or the config could not be saved." }
+    patch:
+      summary: Change a stream source (not saved)
+      description: |
+        Changes the source of the stream `name`, or creates it, **only until the next restart** (not saved to the config).
+        If `src` is the name of another stream, `name` becomes another name for it.
+      tags: [ Streams ]
+      operationId: streamsPatch
+      parameters:
+        - name: name
+          in: query
+          description: Stream name.
+          required: true
+          schema: { type: string }
+          example: camera6
+        - name: src
+          in: query
+          description: New source URL, or the name of another stream.
+          required: true
+          schema: { type: string }
+      responses:
+        "200": { description: Changed. }
+        "400": { description: "`name` missing, unsupported source, or a source that is not allowed from the API." }
+    delete:
+      summary: Remove a stream (saved to config)
+      description: Removes the stream `src` and **deletes it from the config file**.
+      tags: [ Streams ]
+      operationId: streamsDelete
+      parameters:
+        - name: src
+          in: query
+          description: Stream name.
+          required: true
+          schema: { type: string }
+          example: camera6
+      responses:
+        "200": { description: Removed. }
+        "400": { description: The config could not be saved. }
+    post:
+      summary: Play a source to a camera, or publish a stream
+      description: |
+        Two uses:
+        - **Play to a camera** - `dst` is a stream: plays the source `src` to the camera speaker (two-way audio),
+          for example `src=ffmpeg:http://example.com/song.mp3#audio=pcma#input=file`.
+        - **Publish** - `src` is a stream and `dst` is a URL: sends the stream to another server,
+          for example `src=camera1&dst=rtmp://a.rtmp.youtube.com/live2/KEY`. It reconnects every 5 seconds
+          if it stops, until go2rtc restarts (not saved to the config).
+      tags: [ Streams ]
+      operationId: streamsPost
+      parameters:
+        - name: src
+          in: query
+          description: Source URL to play, or the stream to publish.
+          required: true
+          schema: { type: string }
+        - name: dst
+          in: query
+          description: Stream to play to, or the URL to publish to.
+          required: true
+          schema: { type: string }
+      responses:
+        "200": { description: Started. }
+        "400": { description: "`dst` missing, or the URL is not allowed." }
+        "404": { description: "Neither `dst` nor `src` is a stream." }
+        "500": { description: Could not start (for example the camera has no speaker). }
+
+  /api/streams.dot:
+    get:
+      summary: Diagram of the streams (Graphviz)
+      description: Shows how cameras, tracks and viewers are connected, in Graphviz DOT format (the WebUI "net" page draws it).
+      tags: [ Streams ]
+      operationId: streamsDot
+      parameters:
+        - name: src
+          in: query
+          description: Only these streams. Repeat for several. Leave out for all.
+          schema: { type: string }
+      responses:
+        "200":
+          description: DOT graph.
+          content: { text/vnd.graphviz: { example: "digraph { ... }" } }
+
+  /api/preload:
+    get:
+      summary: List streams that are kept connected
+      description: Preloaded streams stay connected to the camera all the time, so viewers get video faster.
+      tags: [ Streams ]
+      operationId: preloadGet
+      responses:
+        "200":
+          description: Preloaded streams.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Preload" }
+    put:
+      summary: Keep a stream connected (saved to config)
+      description: Keeps the stream `src` connected all the time and **saves it to the config** (`preload:`).
+      tags: [ Streams ]
+      operationId: preloadPut
+      parameters:
+        - $ref: "#/components/parameters/src"
+        - name: video
+          in: query
+          description: Video codecs to keep (empty = any). If no `video`/`audio`/`microphone` is given, video and audio are kept.
+          schema: { type: string }
+          allowEmptyValue: true
+        - name: audio
+          in: query
+          description: Audio codecs to keep (empty = any).
+          schema: { type: string }
+          allowEmptyValue: true
+        - name: microphone
+          in: query
+          description: Keep the two-way audio channel too.
+          schema: { type: string }
+          allowEmptyValue: true
+      responses:
+        "200": { description: Preload started and saved. }
+        "500": { description: "Stream not found, no matching codecs, or the config could not be saved." }
+    delete:
+      summary: Stop keeping a stream connected (saved to config)
+      tags: [ Streams ]
+      operationId: preloadDelete
+      parameters:
+        - $ref: "#/components/parameters/src"
+      responses:
+        "200": { description: Removed. }
+        "500": { description: "This stream is not preloaded, or the config could not be saved." }
+
+  /api/schemes:
+    get:
+      summary: Supported source types
+      description: Lists the source URL types this go2rtc understands (`rtsp`, `ffmpeg`, `onvif`, `homekit`...), in random order.
+      tags: [ Streams ]
+      operationId: schemes
+      responses:
+        "200":
+          description: Source types.
+          content:
+            application/json:
+              schema: { type: array, items: { type: string } }
+              example: [ rtsp, rtsps, rtmp, http, https, ffmpeg, exec, onvif, homekit, webrtc, record ]
+
+  /api/ws:
+    get:
+      summary: WebSocket for players (MSE, WebRTC, HLS, MJPEG)
+      description: |
+        Opens a WebSocket (this can't be tried from this page). The WebUI player (`video-rtc.js`) uses it.
+        Messages are JSON text: `{"type": "...", "value": ...}`. Video data comes as binary messages.
+
+        | Send `type` | `value` | You get |
+        |---|---|---|
+        | `mse` | codecs the browser supports, for example `avc1.640029,mp4a.40.2` (empty = any) | `{"type":"mse","value":"<MIME type>"}`, then binary fMP4 |
+        | `mp4` | same as `mse` (video only) | `{"type":"mse",...}`, then binary MP4 keyframes |
+        | `hls` | same as `mse` | `{"type":"hls","value":"<playlist>"}`, then load the playlist over HTTP |
+        | `mjpeg` | (none) | `{"type":"mjpeg"}`, then binary JPEG pictures |
+        | `webrtc` | `{"type":"offer","sdp":"...","ice_servers":[...]}` | `{"type":"webrtc","value":{"type":"answer","sdp":"..."}}`, then `webrtc/candidate` messages |
+        | `webrtc/offer` | SDP text (old version) | `webrtc/answer` with SDP text, then `webrtc/candidate` messages |
+        | `webrtc/candidate` | ICE candidate text | (nothing) |
+
+        Errors come as `{"type":"error","value":"<type>: <message>"}`.
+      tags: [ WebSocket ]
+      operationId: websocket
+      parameters:
+        - name: src
+          in: query
+          description: Stream to watch (a name, or a camera URL that creates a temporary stream).
+          schema: { type: string }
+          example: camera1
+        - name: name
+          in: query
+          description: Name for the temporary stream when `src` is a URL.
+          schema: { type: string }
+        - name: dst
+          in: query
+          description: "WebRTC only: stream to send the browser camera/microphone to."
+          schema: { type: string }
+      responses:
+        "101": { description: Switched to WebSocket. }
+        "403": { description: "The page is on another site (origin not allowed, see `api: origin:`)." }
+
+  /api/stack:
+    get:
+      summary: Running goroutines (debug)
+      description: Shows what go2rtc is doing inside (Go goroutine dump), for bug reports. Common idle goroutines are left out.
+      tags: [ Debug ]
+      operationId: stack
+      responses:
+        "200":
+          description: Goroutine dump.
+          content: { text/plain: { example: "goroutine 42 [running]: ...\n\nTotal: 120, Skipped: 80" } }
+
+  # ---------------------------------------------------------------- Live video
+
+  /api/stream.mp4:
+    get:
+      summary: Live video as MP4 (browser, VLC, download)
+      description: |
+        Streams live video as fragmented MP4 over HTTP. Works in a browser `<video src=...>` tag, VLC and ffplay.
+        The stream runs until you close the connection, or for `duration` seconds.
+
+        - `src` can be a stream name **or a camera URL** (then a temporary stream is created, name it with `name`).
+        - Safari is redirected (`301`) to the HLS version (`stream.m3u8`) unless `duration` is set.
+        - Default codecs: H264/H265 video and AAC audio. Use `mp4`, `video` or `audio` to change this.
+
+        Examples:
+        - `/api/stream.mp4?src=camera1` - watch live
+        - `/api/stream.mp4?src=camera1&duration=30&filename=clip.mp4` - download 30 seconds
+      tags: [ Live video ]
+      operationId: streamMP4
+      parameters:
+        - $ref: "#/components/parameters/src_or_url"
+        - $ref: "#/components/parameters/new_name"
+        - $ref: "#/components/parameters/mp4_filter"
+        - $ref: "#/components/parameters/video_filter"
+        - $ref: "#/components/parameters/audio_filter"
+        - name: duration
+          in: query
+          description: Stop after this many seconds. Without it, the stream never ends.
+          schema: { type: integer, minimum: 1 }
+          example: 30
+        - $ref: "#/components/parameters/filename"
+        - name: rotate
+          in: query
+          description: Rotate the picture (no re-encoding, the player rotates it). Safari ignores it.
+          schema: { type: integer, enum: [ 90, 180, 270 ] }
+        - name: scale
+          in: query
+          description: Ask the player to stretch the picture, `width:height` ratio (no re-encoding, few players support it).
+          schema: { type: string }
+          example: "16:9"
+      responses:
+        "200":
+          description: Live video (never-ending body unless `duration` is set).
+          content:
+            video/mp4:
+              schema: { type: string, format: binary }
+        "301": { description: "Safari is redirected to `stream.m3u8`." }
+        "404": { $ref: "#/components/responses/StreamNotFound" }
+        "500": { description: The stream has no codecs that fit MP4 (or the filter you asked for). }
+
+  /api/stream.m3u8:
+    get:
+      summary: Live video as HLS (Safari, iPhone, smart TVs)
+      description: |
+        Starts a live HLS session and returns the master playlist. The player then loads
+        `hls/playlist.m3u8` and the segments by itself. The session closes 5 seconds after the player stops.
+
+        - Without `mp4`/`video`/`audio` the segments are MPEG-TS (H264/H265 + AAC).
+        - With any of them the segments are fMP4 (more codecs, needs a newer player).
+
+        Note: if the stream can't be played, you get `200` with an empty body.
+      tags: [ Live video ]
+      operationId: streamHLS
+      parameters:
+        - $ref: "#/components/parameters/src"
+        - $ref: "#/components/parameters/mp4_filter"
+        - $ref: "#/components/parameters/video_filter"
+        - $ref: "#/components/parameters/audio_filter"
+      responses:
+        "200":
+          description: Master playlist.
+          content:
+            application/vnd.apple.mpegurl:
+              example: |
+                #EXTM3U
+                #EXT-X-STREAM-INF:BANDWIDTH=192000,CODECS="avc1.640029,mp4a.40.2"
+                hls/playlist.m3u8?id=DvmHdd9w
+        "404": { $ref: "#/components/responses/StreamNotFound" }
+
+  /api/hls/playlist.m3u8:
+    get:
+      summary: HLS media playlist (used by the player)
+      description: You don't call this yourself, the player gets the link from `stream.m3u8`.
+      tags: [ Live video ]
+      operationId: hlsPlaylist
+      parameters:
+        - $ref: "#/components/parameters/hls_id"
+      responses:
+        "200":
+          description: Media playlist.
+          content:
+            application/vnd.apple.mpegurl: { example: "#EXTM3U\n#EXT-X-VERSION:3\n..." }
+        "404": { description: The HLS session is unknown or has expired. }
+
+  /api/hls/segment.ts:
+    get:
+      summary: HLS MPEG-TS segment (used by the player)
+      description: Returns the video received since the previous segment. Waits up to 3 seconds for data.
+      tags: [ Live video ]
+      operationId: hlsSegmentTS
+      parameters:
+        - $ref: "#/components/parameters/hls_id"
+        - $ref: "#/components/parameters/hls_n"
+      responses:
+        "200":
+          description: Segment.
+          content: { video/mp2t: { schema: { type: string, format: binary } } }
+        "404": { description: "Unknown session, or no data within 3 seconds." }
+
+  /api/hls/init.mp4:
+    get:
+      summary: HLS fMP4 init segment (used by the player)
+      description: Codec setup for fMP4 sessions. Waits up to 3 seconds for data.
+      tags: [ Live video ]
+      operationId: hlsInit
+      parameters:
+        - $ref: "#/components/parameters/hls_id"
+      responses:
+        "200":
+          description: Init segment.
+          content: { video/mp4: { schema: { type: string, format: binary } } }
+        "404": { description: "Unknown session, or no data within 3 seconds." }
+
+  /api/hls/segment.m4s:
+    get:
+      summary: HLS fMP4 segment (used by the player)
+      description: Returns the video received since the previous segment. Waits up to 3 seconds for data.
+      tags: [ Live video ]
+      operationId: hlsSegmentMP4
+      parameters:
+        - $ref: "#/components/parameters/hls_id"
+        - $ref: "#/components/parameters/hls_n"
+      responses:
+        "200":
+          description: Segment.
+          content: { video/iso.segment: { schema: { type: string, format: binary } } }
+        "404": { description: "Unknown session, or no data within 3 seconds." }
+
+  /api/webrtc:
+    post:
+      summary: WebRTC - watch a stream (WHEP) or send one (WHIP)
+      description: |
+        Low-delay live video for browsers and apps using WebRTC.
+        You send an SDP **offer**, you get an SDP **answer** with all ICE candidates (no trickle ICE).
+
+        **Watch** (`?src=camera1`) - the body format decides the answer format:
+
+        | Request `Content-Type` | Body | Answer |
+        |---|---|---|
+        | `application/json` | `{"type":"offer","sdp":"v=0..."}` | `200`, JSON `{"type":"answer","sdp":"..."}` |
+        | `application/sdp` (WHEP) | raw SDP | `201`, raw SDP |
+        | `application/x-www-form-urlencoded` | field `data` = base64 SDP | `200`, base64 SDP |
+        | anything else | raw SDP | `200`, raw SDP |
+
+        If the offer only sends media (for example a microphone), the browser **sends** to the stream instead
+        (two-way audio).
+
+        **Send** (`?dst=camera1`, WHIP) - the body is a raw SDP offer, the answer is `201` with raw SDP and a
+        `Location: webrtc?id=...` header. Stop it with `DELETE /api/webrtc?id=...`.
+
+        ICE candidates come from `webrtc: candidates:` in the config.
+      tags: [ Live video ]
+      operationId: webrtcOffer
+      parameters:
+        - name: src
+          in: query
+          description: Stream to watch. Use `src` **or** `dst`.
+          schema: { type: string }
+          example: camera1
+        - name: dst
+          in: query
+          description: Stream to send video/audio to (WHIP).
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/SDP" }
+            example: { type: offer, sdp: "v=0\r\n..." }
+          application/sdp:
+            schema: { type: string }
+            example: "v=0\r\n..."
+          application/x-www-form-urlencoded:
+            schema:
+              type: object
+              properties:
+                data: { type: string, description: Base64 SDP offer }
+      responses:
+        "200":
+          description: Answer (JSON, form or raw SDP request).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SDP" }
+              example: { type: answer, sdp: "v=0\r\n..." }
+        "201":
+          description: Answer (WHEP `application/sdp` request, or WHIP `dst`).
+          headers:
+            Location: { description: "WHIP only: session URL to stop the session (`webrtc?id=...`)", schema: { type: string } }
+          content:
+            application/sdp: { example: "v=0\r\n..." }
+        "400": { description: "No `src` or `dst`, or the body is not valid." }
+        "404": { $ref: "#/components/responses/StreamNotFound" }
+        "500": { description: The connection could not be set up (for example no common codecs). }
+    delete:
+      summary: Stop a WHIP session
+      description: Stops a session that was started with `POST /api/webrtc?dst=...` (WHIP). Watch (WHEP) sessions end when the client disconnects.
+      tags: [ Live video ]
+      operationId: webrtcDelete
+      parameters:
+        - name: id
+          in: query
+          description: Session ID from the `Location` header.
+          required: true
+          schema: { type: string }
+      responses:
+        "200": { description: Session stopped. }
+        "400": { description: "`id` is missing." }
+        "404": { description: No session with this ID. }
+
+  /api/stream.mjpeg:
+    get:
+      summary: Live video as MJPEG (works in an <img> tag)
+      description: |
+        Streams JPEG pictures one after another (`multipart/x-mixed-replace`). Works in a plain `<img src=...>` tag.
+        The stream must already be JPEG (MJPEG camera) or be transcoded to it, for example
+        `ffmpeg:camera1#video=mjpeg` as the stream source.
+      tags: [ Live video ]
+      operationId: streamMJPEG
+      parameters:
+        - $ref: "#/components/parameters/src"
+      responses:
+        "200":
+          description: Never-ending MJPEG stream.
+          content: { multipart/x-mixed-replace: { schema: { type: string, format: binary } } }
+        "404": { $ref: "#/components/responses/StreamNotFound" }
+    post:
+      summary: Send MJPEG video into a stream
+      description: Push an MJPEG stream (`multipart/x-mixed-replace`) into the existing stream `dst`. The request stays open while you send.
+      tags: [ Send video ]
+      operationId: pushMJPEG
+      parameters:
+        - $ref: "#/components/parameters/dst"
+      requestBody:
+        content: { multipart/x-mixed-replace: { schema: { type: string, format: binary } } }
+      responses:
+        "200": { description: Sending finished. }
+        "404": { $ref: "#/components/responses/StreamNotFound" }
+
+  /api/frame.jpeg:
+    get:
+      summary: Snapshot (one JPEG picture)
+      description: |
+        Returns one picture from the stream. H264/H265 cameras are converted to JPEG with FFmpeg,
+        MJPEG cameras are returned as they are.
+
+        - `src` can be a stream name **or a camera URL**.
+        - `width`, `height`, `rotate` and `hardware` work only for H264/H265 streams.
+        - `cache=5s` returns the last picture if it is not older than 5 seconds (faster, less load on the camera).
+
+        Example: `/api/frame.jpeg?src=camera1&width=640`
+      tags: [ Snapshot ]
+      operationId: frameJPEG
+      parameters:
+        - $ref: "#/components/parameters/src_or_url"
+        - $ref: "#/components/parameters/new_name"
+        - name: width
+          in: query
+          description: Resize to this width in pixels (height follows the aspect ratio). Short name `w`.
+          schema: { type: integer, minimum: 1 }
+          example: 640
+        - name: height
+          in: query
+          description: Resize to this height in pixels (width follows the aspect ratio). Short name `h`.
+          schema: { type: integer, minimum: 1 }
+        - name: rotate
+          in: query
+          description: Rotate clockwise by `90`, `180` or `270` degrees (`-90` = `270`).
+          schema: { type: string, enum: [ "90", "180", "270", "-90" ] }
+        - name: hardware
+          in: query
+          description: Use the GPU for the JPEG encoding (`vaapi`, `rkmpp`, `dxva2`...). Short name `hw`.
+          schema: { type: string }
+        - name: cache
+          in: query
+          description: Reuse the last picture if it is younger than this (`5s`, `1m`).
+          schema: { type: string }
+          example: 5s
+      responses:
+        "200":
+          description: JPEG picture.
+          content: { image/jpeg: { schema: { type: string, format: binary } } }
+        "404": { $ref: "#/components/responses/StreamNotFound" }
+        "500": { description: FFmpeg could not make the picture. }
+
+  /api/frame.mp4:
+    get:
+      summary: Snapshot as a tiny MP4 (one keyframe)
+      description: |
+        Returns one keyframe as a small MP4 file, without re-encoding (H264/H265 only).
+        Note: Chrome without a `Range` header gets an empty file (a browser quirk workaround).
+      tags: [ Snapshot ]
+      operationId: frameMP4
+      parameters:
+        - $ref: "#/components/parameters/src"
+        - $ref: "#/components/parameters/filename"
+      responses:
+        "200":
+          description: MP4 with one frame.
+          content: { video/mp4: { schema: { type: string, format: binary } } }
+        "404": { $ref: "#/components/responses/StreamNotFound" }
+        "500": { description: The stream has no H264/H265 video. }
+
+  /api/stream.ts:
+    get:
+      summary: Live video as MPEG-TS
+      description: Streams live video as MPEG-TS (H264/H265 + AAC), for VLC, ffmpeg and TV players.
+      tags: [ Live video ]
+      operationId: streamTS
+      parameters:
+        - $ref: "#/components/parameters/src"
+      responses:
+        "200":
+          description: Never-ending MPEG-TS stream.
+          content: { video/mp2t: { schema: { type: string, format: binary } } }
+        "404": { $ref: "#/components/responses/StreamNotFound" }
+        "500": { description: The stream has no codecs that fit MPEG-TS. }
+    post:
+      summary: Send MPEG-TS video into a stream
+      description: Push an MPEG-TS stream into the existing stream `dst`. The request stays open while you send.
+      tags: [ Send video ]
+      operationId: pushTS
+      parameters:
+        - $ref: "#/components/parameters/dst"
+      requestBody:
+        content: { video/mp2t: { schema: { type: string, format: binary } } }
+      responses:
+        "200": { description: Sending finished. }
+        "404": { $ref: "#/components/responses/StreamNotFound" }
+        "500": { description: "The data is not valid MPEG-TS, or the stream ended." }
+
+  /api/stream.flv:
+    get:
+      summary: Live video as FLV
+      description: Streams live video as FLV (H264 + AAC only), for flv.js and old players.
+      tags: [ Live video ]
+      operationId: streamFLV
+      parameters:
+        - $ref: "#/components/parameters/src"
+      responses:
+        "200":
+          description: Never-ending FLV stream.
+          content: { video/x-flv: { schema: { type: string, format: binary } } }
+        "404": { $ref: "#/components/responses/StreamNotFound" }
+    post:
+      summary: Send FLV video into a stream
+      description: Push an FLV stream into the existing stream `dst`. The request stays open while you send.
+      tags: [ Send video ]
+      operationId: pushFLV
+      parameters:
+        - $ref: "#/components/parameters/dst"
+      requestBody:
+        content: { video/x-flv: { schema: { type: string, format: binary } } }
+      responses:
+        "200": { description: Sending finished. }
+        "404": { $ref: "#/components/responses/StreamNotFound" }
+        "500": { description: The data is not valid FLV. }
+
+  /api/stream.aac:
+    get:
+      summary: Live audio as AAC
+      description: Streams only the audio, as AAC (ADTS). The camera must send AAC audio.
+      tags: [ Live video ]
+      operationId: streamAAC
+      parameters:
+        - $ref: "#/components/parameters/src"
+      responses:
+        "200":
+          description: Never-ending AAC audio.
+          content: { audio/aac: { schema: { type: string, format: binary } } }
+        "404": { $ref: "#/components/responses/StreamNotFound" }
+        "500": { description: The stream has no AAC audio. }
+
+  /api/stream.ascii:
+    get:
+      summary: Live video as text art in the terminal
+      description: |
+        Draws the video as ASCII art with terminal colors. Try it with `curl`:
+        `curl "http://HOST:1984/api/stream.ascii?src=camera1&color=256"`.
+        The stream must be MJPEG or transcoded to it (like `stream.mjpeg`).
+      tags: [ Live video ]
+      operationId: streamASCII
+      parameters:
+        - $ref: "#/components/parameters/src"
+        - name: color
+          in: query
+          description: Text color mode - `8`, `256`, `rgb`, or a terminal color code (`31`). Empty = no color.
+          schema: { type: string }
+        - name: back
+          in: query
+          description: Background color mode, same values as `color`.
+          schema: { type: string }
+        - name: text
+          in: query
+          description: Characters from dark to bright. `block` uses block characters. Default ` .::--~~==++**##%%$@`.
+          schema: { type: string }
+      responses:
+        "200":
+          description: Never-ending text stream.
+          content: { text/plain: { schema: { type: string } } }
+        "404": { $ref: "#/components/responses/StreamNotFound" }
+
+  /api/stream.y4m:
+    get:
+      summary: Live video as raw YUV (y4m)
+      description: Uncompressed video (YUV4MPEG2), for video tools. The stream must provide raw video (for example `ffmpeg:camera1#video=raw`).
+      tags: [ Live video ]
+      operationId: streamY4M
+      parameters:
+        - $ref: "#/components/parameters/src"
+      responses:
+        "200":
+          description: Never-ending raw video.
+          content: { application/octet-stream: { schema: { type: string, format: binary } } }
+        "404": { $ref: "#/components/responses/StreamNotFound" }
+
+  # ---------------------------------------------------------------- Send video
+
+  /api/stream:
+    post:
+      summary: Send video in any format into a stream
+      description: |
+        Push video/audio into the existing stream `dst`. The format is detected from the data:
+        H264/H265 (Annex B), MPEG-TS, FLV, MJPEG, AAC (ADTS), WAV and others.
+        The request stays open while you send.
+
+        Example: `ffmpeg -re -i video.mp4 -c copy -f mpegts http://HOST:1984/api/stream?dst=camera1`
+      tags: [ Send video ]
+      operationId: pushAny
+      parameters:
+        - $ref: "#/components/parameters/dst"
+      requestBody:
+        content: { application/octet-stream: { schema: { type: string, format: binary } } }
+      responses:
+        "200": { description: Sending finished. }
+        "404": { $ref: "#/components/responses/StreamNotFound" }
+        "500": { description: The format was not recognized. }
+
+  /api/ffmpeg:
+    post:
+      summary: Play a file, a live source or speech to a camera speaker
+      description: |
+        Plays audio to the camera speaker (two-way audio) of the stream `dst`, using FFmpeg.
+        Give **one** of `file`, `live` or `text` (checked in this order). The audio is converted to what the camera accepts.
+        The request returns right away, playing continues in the background. A new request stops the previous one.
+
+        Examples:
+        - `?dst=camera1&file=http://example.com/song.mp3`
+        - `?dst=camera1&text=Please leave the area&voice=...`
+      tags: [ Send video ]
+      operationId: ffmpegPlay
+      parameters:
+        - $ref: "#/components/parameters/dst"
+        - name: file
+          in: query
+          description: File path or URL, played at normal speed.
+          schema: { type: string }
+          example: http://example.com/song.mp3
+        - name: live
+          in: query
+          description: Live source URL (internet radio, another stream).
+          schema: { type: string }
+        - name: text
+          in: query
+          description: Text to speak (text-to-speech). Must not contain `' " & % $`.
+          schema: { type: string }
+          example: Hello
+        - name: voice
+          in: query
+          description: Voice for `text` (depends on the TTS engine).
+          schema: { type: string }
+      responses:
+        "200": { description: Playing started. }
+        "400": { description: "No `file`/`live`/`text`, or the value is not allowed (spaces in URL, forbidden characters)." }
+        "404": { description: Stream not found. }
+        "405": { description: Only POST is allowed. }
+        "500": { description: "The camera does not accept audio, or the source could not be opened." }
+
+  # ---------------------------------------------------------------- WebTorrent
+
+  /api/webtorrent:
+    get:
+      summary: Get WebTorrent share(s)
+      description: |
+        WebTorrent lets someone watch a stream over the internet without opening ports (peer-to-peer).
+        - With `src` - the share name and password of that stream.
+        - Without `src` - all shares, as sources.
+      tags: [ WebTorrent ]
+      operationId: webtorrentGet
+      parameters:
+        - name: src
+          in: query
+          description: Stream name. Leave out to list all shares.
+          schema: { type: string }
+      responses:
+        "200":
+          description: Share info, or the list of shares.
+          content:
+            application/json:
+              examples:
+                one: { value: { share: AKDypPy4zz, pwd: H0Km1HLTTP } }
+                all: { value: { sources: [ { id: camera1, url: "webtorrent:?share=AKDypPy4zz&pwd=H0Km1HLTTP" } ] } }
+        "404": { description: No share for this stream (or no shares at all). }
+    post:
+      summary: Share a stream over WebTorrent
+      description: Creates a share with a random name and password for the stream.
+      tags: [ WebTorrent ]
+      operationId: webtorrentCreate
+      parameters:
+        - $ref: "#/components/parameters/src"
+      responses:
+        "201":
+          description: Share created.
+          content: { application/json: { example: { share: AKDypPy4zz, pwd: H0Km1HLTTP } } }
+        "400": { description: This stream is already shared. }
+        "404": { $ref: "#/components/responses/StreamNotFound" }
+    delete:
+      summary: Stop sharing a stream over WebTorrent
+      tags: [ WebTorrent ]
+      operationId: webtorrentDelete
+      parameters:
+        - $ref: "#/components/parameters/src"
+      responses:
+        "200": { description: Share removed. }
+        "404": { description: This stream is not shared. }
+  # ---------------------------------------------------------------- Recording
+
+  /api/record:
+    get:
+      summary: Recording status and disk usage
+      description: |
+        Shows the recording settings, how much disk each camera uses, and the state of every recorder.
+
+        Each recorder `state` is one of:
+        - `connecting` - waiting for the camera stream
+        - `recording` - data is being written
+        - `error` - the stream could not be started (see `error`), the recorder retries by itself
+      tags: [ Recording ]
+      operationId: recordStatus
+      responses:
+        "200":
+          description: Recording status.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/RecordStatus" }
+    put:
+      summary: Start recording a stream
+      description: |
+        Starts recording the stream `src` and **saves it to the config file** (`record: streams:`), so the
+        recording continues after a restart. If the stream is already recorded, its recorder is restarted
+        with the new settings.
+
+        Only `video`, `audio` and `mode` are used, other parameters are ignored.
+      tags: [ Recording ]
+      operationId: recordStart
+      parameters:
+        - $ref: "#/components/parameters/record_src"
+        - name: video
+          in: query
+          description: |
+            Record video. Leave empty (`video`) for any video codec, or list codecs (`video=h264`, `video=h264,h265`).
+            If both `video` and `audio` are missing, nothing can be recorded and you get `400`.
+          schema: { type: string }
+          allowEmptyValue: true
+          example: ""
+        - name: audio
+          in: query
+          description: Record audio. Leave empty (`audio`) for any audio codec, or list codecs (`audio=aac`).
+          schema: { type: string }
+          allowEmptyValue: true
+          example: ""
+        - name: mode
+          in: query
+          description: |
+            - `continuous` (default) - record all the time
+            - `events` - keep the camera connected, but write to disk only around events
+              (see [Events](#/Recording/recordEventCreate))
+          schema: { type: string, enum: [ continuous, events ], default: continuous }
+      responses:
+        "200": { description: Recording started and saved to the config. }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "500": { description: "Recording started, but the config file could not be saved." }
+    delete:
+      summary: Stop recording a stream
+      description: |
+        Stops recording the stream `src` and **removes it from the config file**.
+        Recorded files are kept and deleted later by the retention rules.
+      tags: [ Recording ]
+      operationId: recordStop
+      parameters:
+        - $ref: "#/components/parameters/record_src"
+      responses:
+        "200": { description: Recording stopped. }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "404": { description: This stream is not being recorded. }
+        "500": { description: "Recording stopped, but the config file could not be saved." }
+
+  /api/record/video.mp4:
+    get:
+      summary: Download or play recorded video for a time range
+      description: |
+        Returns **one MP4 file** for the time range, made from the recorded segments on the fly.
+        Open it in a browser `<video>` tag, VLC, or download it.
+
+        Choose the time range with **one** of these:
+        - `start` + `duration`
+        - `start` + `end`
+        - `event` (an event ID, the range is the event plus the `pre`/`post` time)
+
+        How it works:
+        - No re-encoding: it is fast and uses almost no CPU.
+        - The video starts at the **keyframe at or before** `start` (up to a few seconds earlier).
+          The real start is in the `X-Record-Start` header. Add `exact` to start exactly at `start`.
+        - Times when the camera was offline (gaps) are skipped.
+        - Works for the segment being recorded right now.
+        - Seeking and resuming are supported (HTTP `Range` requests).
+        - The longest range is `max_clip` from the config (24 hours by default).
+        - If the camera changed resolution or codec in the range, the video ends at the change
+          (`X-Record-Truncated` header).
+      tags: [ Recording ]
+      operationId: recordVideo
+      parameters:
+        - $ref: "#/components/parameters/record_src"
+        - $ref: "#/components/parameters/record_start"
+        - $ref: "#/components/parameters/record_end"
+        - $ref: "#/components/parameters/record_duration"
+        - $ref: "#/components/parameters/record_event"
+        - name: format
+          in: query
+          description: |
+            `mp4` - a regular MP4 file (not fragmented), for tools that can't open fragmented MP4.
+            Needs FFmpeg. The file is prepared completely before the download starts.
+          schema: { type: string, enum: [ mp4 ] }
+        - name: exact
+          in: query
+          description: |
+            Start exactly at `start` instead of the keyframe before it. Players hide the extra frames
+            before `start`. Needs FFmpeg, and turns on `format=mp4`. Just add `exact` (no value needed).
+          schema: { type: boolean }
+          allowEmptyValue: true
+        - $ref: "#/components/parameters/filename"
+      responses:
+        "200":
+          description: The video.
+          headers:
+            X-Record-Start: { description: Real start time of the video (RFC3339), schema: { type: string } }
+            X-Record-End: { description: Real end time of the video (RFC3339), schema: { type: string } }
+            X-Record-Duration: { description: Video length in seconds (without gaps), schema: { type: string } }
+            X-Record-Gaps: { description: Number of offline gaps that were skipped, schema: { type: integer } }
+            X-Record-Truncated: { description: "Set to `codec change` if the video ends early because the camera changed resolution or codec", schema: { type: string } }
+          content:
+            video/mp4:
+              schema: { type: string, format: binary }
+        "206": { description: "Part of the video (answer to an HTTP `Range` request)." }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "404": { description: Nothing was recorded in this time range. }
+    head:
+      summary: Check a recorded video without downloading it
+      description: Same as GET, but returns only the headers (size, real start and end, gaps).
+      tags: [ Recording ]
+      operationId: recordVideoHead
+      parameters:
+        - $ref: "#/components/parameters/record_src"
+        - $ref: "#/components/parameters/record_start"
+        - $ref: "#/components/parameters/record_end"
+        - $ref: "#/components/parameters/record_duration"
+        - $ref: "#/components/parameters/record_event"
+      responses:
+        "200": { description: Headers only. }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "404": { description: Nothing was recorded in this time range. }
+
+  /api/record/playlist.m3u8:
+    get:
+      summary: HLS playlist of recorded video (for Safari, iPhone, hls.js)
+      description: |
+        Returns an HLS playlist for the time range, for players that prefer HLS (Safari, iOS, hls.js, smart TVs).
+        The playlist points to parts of the same `video.mp4` clip, so nothing extra is stored.
+
+        - Each part starts on a keyframe and is at least `hls_segment` long (4 seconds by default).
+        - Every part has its real time (`EXT-X-PROGRAM-DATE-TIME`), also after gaps.
+        - If the range reaches into the future and the camera is recording, the playlist is **live**:
+          the player keeps reloading it and gets the new video.
+
+        The time range parameters are the same as for `video.mp4`.
+      tags: [ Recording ]
+      operationId: recordPlaylist
+      parameters:
+        - $ref: "#/components/parameters/record_src"
+        - $ref: "#/components/parameters/record_start"
+        - $ref: "#/components/parameters/record_end"
+        - $ref: "#/components/parameters/record_duration"
+        - $ref: "#/components/parameters/record_event"
+      responses:
+        "200":
+          description: HLS playlist.
+          content:
+            application/vnd.apple.mpegurl:
+              example: |
+                #EXTM3U
+                #EXT-X-VERSION:7
+                #EXT-X-PLAYLIST-TYPE:VOD
+                #EXT-X-TARGETDURATION:5
+                #EXT-X-MEDIA-SEQUENCE:0
+                #EXT-X-INDEPENDENT-SEGMENTS
+                #EXT-X-MAP:URI="video.mp4?...",BYTERANGE="1234@0"
+                #EXT-X-PROGRAM-DATE-TIME:2026-10-17T14:00:00.000Z
+                #EXTINF:4.000,
+                #EXT-X-BYTERANGE:456789@1234
+                video.mp4?...
+                #EXT-X-ENDLIST
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "404": { description: Nothing was recorded in this time range. }
+
+  /api/record/timeline:
+    get:
+      summary: What was recorded, what is missing, and the events
+      description: |
+        Returns the recorded time ranges, the gaps between them (camera offline), and the events.
+        Use it to draw a timeline in a player.
+
+        Recordings closer than 1 second to each other are merged into one range.
+        Without `start` and `end` you get everything that is stored.
+      tags: [ Recording ]
+      operationId: recordTimeline
+      parameters:
+        - $ref: "#/components/parameters/record_src"
+        - $ref: "#/components/parameters/record_start_optional"
+        - $ref: "#/components/parameters/record_end_optional"
+      responses:
+        "200":
+          description: Timeline.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ranges:
+                    description: Recorded time ranges, oldest first.
+                    type: array
+                    items: { $ref: "#/components/schemas/TimeRange" }
+                  gaps:
+                    description: Missing time between the ranges.
+                    type: array
+                    items: { $ref: "#/components/schemas/TimeRange" }
+                  events:
+                    type: array
+                    items: { $ref: "#/components/schemas/RecordEvent" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+
+  /api/record/segments:
+    get:
+      summary: List recorded segment files
+      description: |
+        Lists the segment files (usually 1 minute each) that overlap the time range, oldest first.
+        Use the `id` to download a file with `segment.mp4`. Without `start` and `end` you get all segments.
+      tags: [ Recording ]
+      operationId: recordSegments
+      parameters:
+        - $ref: "#/components/parameters/record_src"
+        - $ref: "#/components/parameters/record_start_optional"
+        - $ref: "#/components/parameters/record_end_optional"
+      responses:
+        "200":
+          description: Segments.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/RecordSegment" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+
+  /api/record/segment.mp4:
+    get:
+      summary: Download one segment file
+      description: |
+        Downloads one recorded segment file as it is stored on disk. Get the `id` from `segments`.
+        Seeking and resuming are supported (HTTP `Range` requests).
+      tags: [ Recording ]
+      operationId: recordSegment
+      parameters:
+        - name: src
+          in: query
+          description: Stream name.
+          required: true
+          schema: { type: string }
+          example: camera1
+        - name: id
+          in: query
+          description: Segment ID from the `segments` list.
+          required: true
+          schema: { type: string }
+          example: 2026-10-17/2026-10-17T14-03-00.123Z.mp4
+        - $ref: "#/components/parameters/filename"
+      responses:
+        "200":
+          description: The segment file.
+          content:
+            video/mp4:
+              schema: { type: string, format: binary }
+        "206": { description: "Part of the file (answer to an HTTP `Range` request)." }
+        "404": { description: No segment with this ID (or it was already deleted). }
+
+  /api/record/events:
+    get:
+      summary: List events
+      description: |
+        Lists the events of a stream (for example motion or alarm), oldest first.
+        Without `start` and `end` you get all stored events.
+      tags: [ Recording ]
+      operationId: recordEventList
+      parameters:
+        - $ref: "#/components/parameters/record_src"
+        - $ref: "#/components/parameters/record_start_optional"
+        - $ref: "#/components/parameters/record_end_optional"
+      responses:
+        "200":
+          description: Events.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/RecordEvent" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+    post:
+      summary: Create an event
+      description: |
+        Marks a moment in the recording, for example when a motion detector or an alarm fires.
+        Call it from your own system.
+
+        - Without `end` and `duration` the event is **in progress**: end it later with `PUT`.
+          It is ended automatically after `max_event` (1 hour by default).
+        - In `mode=events` recording, the video around events (plus `pre` and `post` time) is saved
+          to disk, everything else is not kept.
+        - Watch the event with `video.mp4?src=...&event=<id>` or `playlist.m3u8?src=...&event=<id>`.
+
+        Examples:
+        - `POST /api/record/events?src=camera1&label=motion` - event starts now, still going on
+        - `POST /api/record/events?src=camera1&label=motion&duration=30` - 30 seconds from now
+        - `POST /api/record/events?src=camera1&start=-15&duration=30` - started 15 seconds ago
+      tags: [ Recording ]
+      operationId: recordEventCreate
+      parameters:
+        - $ref: "#/components/parameters/record_src"
+        - name: label
+          in: query
+          description: Free text that says what happened (`motion`, `person`, `alarm`...).
+          schema: { type: string }
+          example: motion
+        - name: start
+          in: query
+          description: When the event started. Default is now. Same formats as for `video.mp4` (`-15` = 15 seconds ago).
+          schema: { type: string }
+        - name: end
+          in: query
+          description: When the event ended. Leave out (with `duration`) for an event in progress.
+          schema: { type: string }
+        - name: duration
+          in: query
+          description: Event length from `start`, in seconds (`30`) or as a duration (`2m`). Instead of `end`.
+          schema: { type: string }
+          example: "30"
+      responses:
+        "200":
+          description: The new event, with its ID.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/RecordEvent" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "500": { description: The event could not be saved. }
+    put:
+      summary: End an event in progress
+      description: Sets the end time of an event (now by default).
+      tags: [ Recording ]
+      operationId: recordEventEnd
+      parameters:
+        - $ref: "#/components/parameters/record_src"
+        - $ref: "#/components/parameters/record_event_id"
+        - name: end
+          in: query
+          description: End time. Default is now. Must not be before the event start.
+          schema: { type: string }
+      responses:
+        "200":
+          description: The updated event.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/RecordEvent" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "404": { description: No event with this ID. }
+    delete:
+      summary: Delete an event
+      description: |
+        Deletes the event. In `continuous` mode the recorded video is not affected. In `mode=events`
+        the video that no other event covers is deleted automatically a little later.
+      tags: [ Recording ]
+      operationId: recordEventDelete
+      parameters:
+        - $ref: "#/components/parameters/record_src"
+        - $ref: "#/components/parameters/record_event_id"
+      responses:
+        "200": { description: Event deleted. }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "404": { description: No event with this ID. }
+
+  # ---------------------------------------------------------------- Discovery
+
+  /api/onvif:
+    get:
+      summary: Find ONVIF cameras, or list the streams of one camera
+      description: |
+        - Without `src` - searches the local network for ONVIF cameras (multicast). Add the user and password to the URL you get.
+        - With `src` (`onvif://user:pass@ip:port`) - connects to that camera and lists its streams (profiles) and the snapshot.
+      tags: [ Discovery ]
+      operationId: discoverONVIF
+      parameters:
+        - name: src
+          in: query
+          description: ONVIF camera URL with user and password.
+          schema: { type: string }
+          example: onvif://admin:pass@192.168.1.20:80
+      responses:
+        "200": { $ref: "#/components/responses/Sources" }
+        "404": { $ref: "#/components/responses/NoSources" }
+        "500": { description: "Search failed, or the camera did not answer / wrong login." }
+
+  /api/dvrip:
+    get:
+      summary: Find DVRIP (XMeye) cameras
+      description: Searches the local network for cheap XMeye/DVRIP cameras and recorders (takes 2 seconds).
+      tags: [ Discovery ]
+      operationId: discoverDVRIP
+      responses:
+        "200": { $ref: "#/components/responses/Sources" }
+        "404": { $ref: "#/components/responses/NoSources" }
+        "500": { description: Could not listen on the network. }
+
+  /api/discovery/homekit:
+    get:
+      summary: Find HomeKit cameras and doorbells
+      description: |
+        Searches the local network (mDNS) for HomeKit cameras and doorbells. Pair one with `POST /api/homekit`.
+        `location` is the go2rtc stream that already uses the camera (a space if none).
+      tags: [ Discovery ]
+      operationId: discoverHomeKit
+      responses:
+        "200": { $ref: "#/components/responses/Sources" }
+        "404": { $ref: "#/components/responses/NoSources" }
+        "507": { description: The mDNS search failed. }
+
+  /api/ffmpeg/devices:
+    get:
+      summary: Find USB cameras and microphones on this machine
+      description: Lists local video and audio devices through FFmpeg (v4l2/ALSA on Linux, AVFoundation on macOS, DirectShow on Windows). The result is cached until restart.
+      tags: [ Discovery ]
+      operationId: discoverFFmpegDevices
+      responses:
+        "200": { $ref: "#/components/responses/Sources" }
+        "404": { $ref: "#/components/responses/NoSources" }
+
+  /api/ffmpeg/hardware:
+    get:
+      summary: Test GPU (hardware) video encoding
+      description: |
+        Tries every hardware encoder FFmpeg may support on this machine (VAAPI, CUDA, V4L2 M2M, Rockchip, VideoToolbox, DXVA2)
+        and says `OK` or `ERROR` for each. Slow: it runs FFmpeg several times.
+      tags: [ Discovery ]
+      operationId: discoverHardware
+      responses:
+        "200":
+          description: One item per encoder, `name` is `OK` or `ERROR`.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Sources" }
+              example: { sources: [ { name: OK, url: "ffmpeg:...#video=h264#hardware=vaapi" } ] }
+
+  /api/v4l2:
+    get:
+      summary: Find video devices (Linux V4L2)
+      description: Lists `/dev/video*` devices with their formats and resolutions, without FFmpeg. Linux only.
+      tags: [ Discovery ]
+      operationId: discoverV4L2
+      responses:
+        "200": { $ref: "#/components/responses/Sources" }
+        "404": { $ref: "#/components/responses/NoSources" }
+
+  /api/alsa:
+    get:
+      summary: Find audio devices (Linux ALSA)
+      description: Lists sound cards (`/dev/snd/pcm*`) with their formats, rates and channels. Linux only.
+      tags: [ Discovery ]
+      operationId: discoverALSA
+      responses:
+        "200": { $ref: "#/components/responses/Sources" }
+        "404": { $ref: "#/components/responses/NoSources" }
+
+  /api/gopro:
+    get:
+      summary: Find GoPro cameras (USB webcam mode)
+      tags: [ Discovery ]
+      operationId: discoverGoPro
+      responses:
+        "200": { $ref: "#/components/responses/Sources" }
+        "404": { $ref: "#/components/responses/NoSources" }
+
+  /api/hass:
+    get:
+      summary: Cameras from Home Assistant
+      description: "Lists cameras configured in Home Assistant (generic, HomeKit and ONVIF integrations). Needs `hass: config:` in the go2rtc config."
+      tags: [ Discovery ]
+      operationId: discoverHass
+      responses:
+        "200": { $ref: "#/components/responses/Sources" }
+        "404": { description: "No Home Assistant config found (`no hass config`), or no cameras." }
+
+  /api/ring:
+    get:
+      summary: Ring cameras (cloud login)
+      description: |
+        Logs in to the Ring cloud and lists your cameras (a video and a snapshot source for each).
+        Give `email` + `password` (+ `code` for two-factor login), or a `refresh_token`.
+        If a two-factor code is needed you get `{"needs_2fa": true, "prompt": "..."}`: repeat with `code`.
+      tags: [ Discovery ]
+      operationId: discoverRing
+      parameters:
+        - { name: email, in: query, description: Ring account email., schema: { type: string } }
+        - { name: password, in: query, description: Ring account password., schema: { type: string } }
+        - { name: code, in: query, description: Two-factor code (second request)., schema: { type: string } }
+        - { name: refresh_token, in: query, description: Use a saved token instead of email and password., schema: { type: string } }
+      responses:
+        "200":
+          description: Cameras, or a request for the two-factor code.
+          content:
+            application/json:
+              examples:
+                cameras: { value: { sources: [ { name: Front Door, url: "ring:?camera_id=...&device_id=...&refresh_token=..." } ] } }
+                needs2fa: { value: { needs_2fa: true, prompt: "Enter the code sent to +1***" } }
+        "400": { description: Neither email/password nor refresh_token. }
+        "404": { $ref: "#/components/responses/NoSources" }
+        "500": { description: Login or cloud error. }
+
+  /api/tuya:
+    get:
+      summary: Tuya / Smart Life cameras (cloud login)
+      description: Logs in to the Tuya cloud and lists your cameras. The source URLs contain your password.
+      tags: [ Discovery ]
+      operationId: discoverTuya
+      parameters:
+        - { name: email, in: query, required: true, description: Account email or phone number., schema: { type: string } }
+        - { name: password, in: query, required: true, description: Account password., schema: { type: string } }
+        - name: region
+          in: query
+          required: true
+          description: Tuya server of your region.
+          schema:
+            type: string
+            enum: [ protect-eu.ismartlife.me, protect-we.ismartlife.me, protect-us.ismartlife.me, protect-ue.ismartlife.me, protect.ismartlife.me, protect-in.ismartlife.me ]
+      responses:
+        "200": { $ref: "#/components/responses/Sources" }
+        "400": { description: "A parameter is missing, or unknown region." }
+        "404": { description: No cameras found. }
+        "500": { description: Login failed. }
+
+  /api/nest:
+    get:
+      summary: Google Nest cameras (cloud)
+      description: Lists your Nest cameras through the Google Smart Device Management API. You need a Google Device Access project.
+      tags: [ Discovery ]
+      operationId: discoverNest
+      parameters:
+        - { name: client_id, in: query, required: true, description: OAuth client ID., schema: { type: string } }
+        - { name: client_secret, in: query, required: true, description: OAuth client secret., schema: { type: string } }
+        - { name: refresh_token, in: query, required: true, description: OAuth refresh token., schema: { type: string } }
+        - { name: project_id, in: query, required: true, description: Device Access project ID., schema: { type: string } }
+      responses:
+        "200": { $ref: "#/components/responses/Sources" }
+        "404": { $ref: "#/components/responses/NoSources" }
+        "500": { description: Login or cloud error. }
+
+  /api/roborock:
+    get:
+      summary: Roborock vacuum cameras (after login)
+      description: Lists your Roborock vacuums with a camera. Log in first with POST (or have Roborock set up in Home Assistant).
+      tags: [ Discovery ]
+      operationId: discoverRoborock
+      responses:
+        "200": { $ref: "#/components/responses/Sources" }
+        "404": { description: "Not logged in (`no auth`), or no devices." }
+        "500": { description: Cloud error. }
+    post:
+      summary: Log in to Roborock and list vacuums
+      description: Logs in to the Roborock cloud (the login is kept in memory until restart) and lists the vacuums.
+      tags: [ Discovery ]
+      operationId: loginRoborock
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [ username, password ]
+              properties:
+                username: { type: string, description: Roborock account email }
+                password: { type: string }
+      responses:
+        "200": { $ref: "#/components/responses/Sources" }
+        "400": { description: Empty username or password. }
+        "500": { description: Login failed (or the body is not multipart/form-data). }
+
+  /api/wyze:
+    get:
+      summary: Wyze accounts and cameras
+      description: |
+        - Without `id` - the Wyze accounts saved in the config (list of emails).
+        - With `id` - the cameras of that account.
+      tags: [ Discovery ]
+      operationId: discoverWyze
+      parameters:
+        - { name: id, in: query, description: Account email., schema: { type: string } }
+      responses:
+        "200":
+          description: Account list, or cameras.
+          content:
+            application/json:
+              examples:
+                accounts: { value: [ "me@example.com" ] }
+                cameras: { value: { sources: [ { name: Garage, info: "WYZE_CAKP2JFUS | 2CAA8E000000 | 192.168.1.30", url: "wyze://192.168.1.30?..." } ] } }
+        "404": { $ref: "#/components/responses/NoSources" }
+        "500": { description: Account not found or cloud error. }
+    post:
+      summary: Add a Wyze account (saved to config)
+      description: Logs in to Wyze, **saves the account to the config** and lists its cameras. Get the API key at developer-api-console.wyze.com.
+      tags: [ Discovery ]
+      operationId: loginWyze
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              type: object
+              required: [ email, password, api_key, api_id ]
+              properties:
+                email: { type: string }
+                password: { type: string }
+                api_key: { type: string }
+                api_id: { type: string }
+      responses:
+        "200": { $ref: "#/components/responses/Sources" }
+        "400": { description: A field is missing. }
+        "401":
+          description: Login failed, or multi-factor login is needed.
+          content: { application/json: { example: { message: "...", needs_mfa: true, mfa_type: "TotpVerificationCode" } } }
+        "500": { description: Cloud error. }
+
+  /api/xiaomi:
+    get:
+      summary: Xiaomi accounts and cameras
+      description: |
+        - Without `id` - the Xiaomi accounts saved in the config (list of user IDs).
+        - With `id` - the cameras of that account (cameras, peepholes, pet feeders).
+      tags: [ Discovery ]
+      operationId: discoverXiaomi
+      parameters:
+        - { name: id, in: query, description: Xiaomi user ID., schema: { type: string } }
+        - name: region
+          in: query
+          description: Server region. Empty = China.
+          schema: { type: string, enum: [ "", de, i2, ru, sg, us ] }
+      responses:
+        "200":
+          description: Account list, or cameras.
+          content:
+            application/json:
+              examples:
+                accounts: { value: [ "1234567890" ] }
+                cameras: { value: { sources: [ { name: Camera, info: "ip: 192.168.1.40, mac: ...", url: "xiaomi://1234567890:de@192.168.1.40?did=...&model=..." } ] } }
+        "404": { $ref: "#/components/responses/NoSources" }
+        "500": { description: Cloud error. }
+    post:
+      summary: Log in to Xiaomi (saved to config)
+      description: |
+        Login in steps. **Saves the account token to the config** when done.
+        1. Send `username` and `password`.
+        2. If you get `401` with `captcha` (an image), send `captcha` with the text from the image.
+        3. If you get `401` with `verify_phone`/`verify_email`, send `verify` with the code you received.
+
+        Send only the fields of the current step.
+      tags: [ Discovery ]
+      operationId: loginXiaomi
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              type: object
+              properties:
+                username: { type: string }
+                password: { type: string }
+                captcha: { type: string, description: Text from the captcha image }
+                verify: { type: string, description: Code from SMS or email }
+      responses:
+        "200": { description: Logged in and saved. }
+        "400": { description: No fields given. }
+        "401":
+          description: Another step is needed.
+          content: { application/json: { example: { verify_phone: "+86 ***" } } }
+        "500": { description: Login failed. }
+
+  # ---------------------------------------------------------------- HomeKit
+
+  /api/homekit:
+    get:
+      summary: go2rtc HomeKit server status
+      description: |
+        go2rtc can show streams in the Apple Home app (config `homekit:`). This shows the pairing state:
+        - Without `id` - all streams shared to HomeKit.
+        - With `id` - one stream. `setup_code` is shown while it is not paired yet.
+      tags: [ HomeKit ]
+      operationId: homekitServers
+      parameters:
+        - { name: id, in: query, description: Stream name., schema: { type: string } }
+      responses:
+        "200":
+          description: Server state.
+          content: { application/json: { example: { name: camera1, device_id: "AA:BB:CC:DD:EE:FF", setup_code: "195-50-224", setup_id: "ABCD" } } }
+        "404": { description: This stream is not shared to HomeKit. }
+    post:
+      summary: Pair a HomeKit camera (saved to config)
+      description: |
+        Pairs go2rtc with a HomeKit camera found by `/api/discovery/homekit`, creates the stream `id` and
+        **saves it to the config**.
+      tags: [ HomeKit ]
+      operationId: homekitPair
+      parameters:
+        - { name: id, in: query, required: true, description: Name for the new stream., schema: { type: string }, example: doorbell }
+        - { name: src, in: query, required: true, description: "`homekit://...` URL from discovery.", schema: { type: string } }
+        - { name: pin, in: query, required: true, description: "HomeKit setup code of the camera (`123-45-678`).", schema: { type: string } }
+      responses:
+        "200": { description: Paired and saved. }
+        "500": { description: "Pairing failed (wrong code, camera already paired...)." }
+    delete:
+      summary: Unpair a HomeKit camera (saved to config)
+      description: Unpairs the camera, removes the stream and **deletes it from the config**.
+      tags: [ HomeKit ]
+      operationId: homekitUnpair
+      parameters:
+        - { name: id, in: query, required: true, description: Stream name., schema: { type: string } }
+      responses:
+        "200": { description: Unpaired and removed. }
+        "500": { description: "Stream not found, not a HomeKit stream, or unpairing failed." }
+
+  /api/homekit/accessories:
+    get:
+      summary: HomeKit camera details
+      description: Asks the paired HomeKit camera of stream `id` for its accessory list (all services and settings, HAP JSON).
+      tags: [ HomeKit ]
+      operationId: homekitAccessories
+      parameters:
+        - { name: id, in: query, required: true, description: Stream name., schema: { type: string } }
+      responses:
+        "200":
+          description: HAP accessories.
+          content: { application/json: { example: { accessories: [ ] } } }
+        "400": { description: The stream is not a HomeKit camera. }
+        "404": { description: Stream not found. }
+        "500": { description: The camera could not be reached. }
+
+  /pair-setup:
+    post:
+      summary: HomeKit pairing (used by Apple devices)
+      description: |
+        Part of the HomeKit protocol, called by the Apple Home app when you add a go2rtc stream. Not for manual use.
+        Saves the pairing to the config. Only when `homekit:` is configured. Not affected by `base_path`.
+      tags: [ HomeKit ]
+      operationId: hapPairSetup
+      security: [ ]
+      requestBody:
+        content: { application/pairing+tlv8: { schema: { type: string, format: binary } } }
+      responses:
+        "200": { description: HomeKit protocol answer. }
+
+  /pair-verify:
+    post:
+      summary: HomeKit session start (used by Apple devices)
+      description: Part of the HomeKit protocol, starts an encrypted session with a paired Apple device. Not for manual use.
+      tags: [ HomeKit ]
+      operationId: hapPairVerify
+      security: [ ]
+      requestBody:
+        content: { application/pairing+tlv8: { schema: { type: string, format: binary } } }
+      responses:
+        "200": { description: HomeKit protocol answer. }
+
+  # ---------------------------------------------------------------- ONVIF server
+
+  /onvif/{service}:
+    post:
+      summary: ONVIF server (for NVRs)
+      description: |
+        go2rtc answers like an ONVIF camera, so an NVR (Synology, Blue Iris, Frigate...) can add it.
+        Every go2rtc stream is one ONVIF profile, the video comes from the go2rtc RTSP server.
+        The request is a SOAP XML message, the operation is taken from the body.
+
+        Supported operations include GetCapabilities, GetServices, GetDeviceInformation, GetProfiles,
+        GetStreamUri, GetSnapshotUri, GetVideoSources and GetSystemDateAndTime.
+        **SystemReboot stops go2rtc** (it exits after 1 second).
+
+        Note: the ONVIF requests themselves are not password checked by ONVIF (only by the API login).
+      tags: [ ONVIF ]
+      operationId: onvifServer
+      parameters:
+        - name: service
+          in: path
+          required: true
+          description: Any service path, for example `device_service` or `media_service`.
+          schema: { type: string }
+          example: device_service
+      requestBody:
+        content:
+          application/soap+xml:
+            schema: { type: string }
+            example: |
+              <s:Envelope xmlns:s="http://www.w3.org/2003/05/soap-envelope"><s:Body><GetProfiles xmlns="http://www.onvif.org/ver10/media/wsdl"/></s:Body></s:Envelope>
+      responses:
+        "200":
+          description: SOAP answer.
+          content: { application/soap+xml: { schema: { type: string } } }
+        "400": { description: "Not a SOAP message, or unsupported operation." }
+
+  # ---------------------------------------------------------------- Home Assistant
+
+  /stream/{id}/add:
+    post:
+      summary: Add a stream (Home Assistant RTSPtoWebRTC)
+      description: |
+        Used by the Home Assistant RTSPtoWebRTC integration. Adds a stream until the next restart (not saved to the config).
+        Not affected by `base_path`.
+      tags: [ Home Assistant ]
+      operationId: hassAdd
+      parameters:
+        - { name: id, in: path, required: true, description: Any ID (not used)., schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            example: { name: camera1, channels: { "0": { url: "rtsp://user:pass@192.168.1.10/stream1" } } }
+      responses:
+        "200":
+          description: Added.
+          content: { application/json: { example: { status: 1, payload: { } } } }
+        "400": { description: Wrong JSON or unsupported source. }
+
+  /stream/{name}/channel/0/webrtc:
+    post:
+      summary: Start WebRTC (Home Assistant RTSPtoWebRTC)
+      description: Used by the Home Assistant RTSPtoWebRTC integration. Takes a base64 SDP offer in `data`, returns the base64 SDP answer.
+      tags: [ Home Assistant ]
+      operationId: hassWebRTC
+      parameters:
+        - { name: name, in: path, required: true, description: Stream name., schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              type: object
+              required: [ data ]
+              properties:
+                data: { type: string, description: Base64 SDP offer }
+      responses:
+        "200":
+          description: Base64 SDP answer.
+          content: { text/plain: { schema: { type: string } } }
+        "400": { description: Wrong URL or base64. }
+        "404": { $ref: "#/components/responses/StreamNotFound" }
+        "500": { description: WebRTC could not be set up. }
+
+  /streams:
+    get:
+      summary: Compatibility check (Home Assistant RTSPtoWebRTC)
+      description: Always answers OK, for the Home Assistant RTSPtoWebRTC integration.
+      tags: [ Home Assistant ]
+      operationId: hassStreams
+      responses:
+        "200":
+          description: OK.
+          content: { application/json: { example: { status: 1, payload: { } } } }
+
+  /static:
+    get:
+      summary: Compatibility check (Home Assistant RTSPtoWebRTC)
+      description: Always answers OK, for the Home Assistant RTSPtoWebRTC integration.
+      tags: [ Home Assistant ]
+      operationId: hassStatic
+      responses:
+        "200":
+          description: OK.
+          content: { application/json: { example: { status: 1, payload: { } } } }

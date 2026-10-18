@@ -4,6 +4,8 @@ This folder contains static HTTP and JS content that is embedded into the applic
 
 ## HTTP API
 
+`www/swagger/` - API documentation (Swagger UI) at `http://localhost:1984/swagger/`. The spec `www/swagger/openapi.yaml` is a copy of [website/api/openapi.yaml](../website/api/openapi.yaml), keep them the same (checked by a test). Swagger UI (Apache 2.0) is bundled, so it works without internet.
+
 `www/stream.html` - universal viewer with support params in URL:
 
 - multiple streams on page `src=camera1&src=camera2...`
