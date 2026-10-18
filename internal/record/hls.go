@@ -20,6 +20,10 @@ import (
 // Media segments are byte ranges of the video.mp4 clip for the same time range,
 // so there is no additional storage or processing.
 func apiPlaylist(w http.ResponseWriter, r *http.Request) {
+	if !allowMethod(w, r, "GET", "HEAD") {
+		return
+	}
+
 	src, from, to, err := parseRange(r.URL.Query())
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)

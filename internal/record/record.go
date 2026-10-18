@@ -173,7 +173,14 @@ func Start(name, rawQuery string) error {
 		r.stop()
 	}
 
-	r := &recorder{name: name, query: rawQuery, mode: mode, medias: medias, done: make(chan struct{})}
+	r := &recorder{
+		name:   name,
+		query:  rawQuery,
+		mode:   mode,
+		medias: medias,
+		done:   make(chan struct{}),
+		exited: make(chan struct{}),
+	}
 	recorders[name] = r
 	go r.run()
 
@@ -268,11 +275,22 @@ func durationOption(name, value string, def time.Duration) time.Duration {
 // Shutdown properly closes all open segments, should be called before exit
 func Shutdown() {
 	recordersMu.Lock()
-	defer recordersMu.Unlock()
-
+	list := make([]*recorder, 0, len(recorders))
 	for _, r := range recorders {
 		r.stop()
+		list = append(list, r)
+	}
+	recordersMu.Unlock()
 
+	// one deadline for all recorders, they stop in parallel
+	timeout := time.After(3 * time.Second)
+	for _, r := range list {
+		if r.exited != nil {
+			select {
+			case <-r.exited:
+			case <-timeout:
+			}
+		}
 		r.mu.Lock()
 		if r.cons != nil {
 			_ = r.cons.Stop()

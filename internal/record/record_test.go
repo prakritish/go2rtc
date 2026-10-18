@@ -1,6 +1,8 @@
 package record
 
 import (
+	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -208,5 +210,24 @@ func TestParseRange(t *testing.T) {
 	} {
 		_, _, _, err = parseRange(q(s))
 		require.Error(t, err, s)
+	}
+}
+
+func TestSetAttachmentAndMethods(t *testing.T) {
+	w := httptest.NewRecorder()
+	setAttachment(w, `clip"evil.mp4`)
+	require.Equal(t, `attachment; filename="clip\"evil.mp4"`, w.Header().Get("Content-Disposition"))
+
+	for _, fn := range []http.HandlerFunc{apiSegments, apiSegment, apiTimeline, apiVideo, apiPlaylist} {
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodPost, "/api/record/video.mp4?src=cam1", nil)
+		fn(rec, req)
+		require.Equal(t, http.StatusMethodNotAllowed, rec.Code)
+
+		// CORS preflight
+		rec = httptest.NewRecorder()
+		req = httptest.NewRequest(http.MethodOptions, "/api/record/video.mp4?src=cam1", nil)
+		fn(rec, req)
+		require.Equal(t, http.StatusOK, rec.Code)
 	}
 }

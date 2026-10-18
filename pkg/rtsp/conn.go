@@ -326,6 +326,9 @@ func (c *Conn) handleRawPacket(channel byte, buf []byte) error {
 }
 
 func (c *Conn) handleSenderReport(channel byte, sr *rtcp.SenderReport) {
+	if sr.NTPTime == 0 {
+		return
+	}
 	for _, receiver := range c.Receivers {
 		if receiver.ID == channel {
 			receiver.SetSenderReport(&core.SenderReport{

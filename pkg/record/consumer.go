@@ -250,7 +250,20 @@ func (c *Consumer) SetHold(hold bool) {
 	}
 	c.hold = hold
 
-	if hold || c.seg == nil || !c.seg.mem || len(c.seg.memGOPs) == 0 {
+	if hold {
+		return
+	}
+
+	if c.seg == nil || !c.seg.mem || len(c.seg.memGOPs) == 0 {
+		if p := c.prevMem; p != nil && len(p.memGOPs) > 0 {
+			p.trimTo(p.memDuration - c.opts.PreBuffer)
+			if err := p.materialize(c.opts.Dir); err != nil {
+				c.fail(err)
+			} else if c.opts.OnSegment != nil {
+				c.opts.OnSegment(p.info)
+			}
+		}
+		c.prevMem = nil
 		return
 	}
 
@@ -459,7 +472,7 @@ func (c *Consumer) closeSegment(nextTS *uint32, chain bool) {
 	// Segment start is the arrival time of the first keyframe, it can be late because of
 	// the startup latency (camera, encoder, network). Correct it with the best estimate.
 	if !c.minStart.IsZero() {
-		est := c.minStart.Truncate(time.Millisecond)
+		est := c.minStart.Add(seg.timeBase).Truncate(time.Millisecond)
 		if est.Before(c.prevEnd) {
 			est = c.prevEnd // don't overlap the previous segment
 		}
@@ -477,7 +490,7 @@ func (c *Consumer) closeSegment(nextTS *uint32, chain bool) {
 		c.fail(err)
 	}
 
-	end := seg.info.Start.Add(duration)
+	end := seg.info.Start.Add(duration - seg.timeBase) // info.Duration is not set for memory segments
 	c.prevEnd = end
 	if chain && nextTS != nil {
 		c.nextStart = end
