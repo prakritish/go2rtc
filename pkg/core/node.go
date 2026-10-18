@@ -30,7 +30,7 @@ type Node struct {
 	Output HandlerFunc
 
 	id     uint32
-	childs []*Node
+	childs []*Node // copy-on-write: never changed in place, so a reader can iterate it without the lock
 	parent *Node
 
 	mu sync.Mutex
@@ -69,7 +69,7 @@ func (n *Node) WithParent(parent *Node) *Node {
 
 func (n *Node) AppendChild(child *Node) {
 	n.mu.Lock()
-	n.childs = append(n.childs, child)
+	n.childs = append(n.childs[:len(n.childs):len(n.childs)], child) // always a new array
 	n.mu.Unlock()
 
 	child.mu.Lock()
@@ -84,11 +84,20 @@ func (n *Node) Parent() *Node {
 	return n.parent
 }
 
+// childList returns the current child nodes, the slice must not be changed
+func (n *Node) childList() []*Node {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	return n.childs
+}
+
 func (n *Node) RemoveChild(child *Node) {
 	n.mu.Lock()
 	for i, ch := range n.childs {
 		if ch == child {
-			n.childs = append(n.childs[:i], n.childs[i+1:]...)
+			childs := make([]*Node, 0, len(n.childs)-1)
+			childs = append(childs, n.childs[:i]...)
+			n.childs = append(childs, n.childs[i+1:]...)
 			break
 		}
 	}
@@ -107,11 +116,7 @@ func (n *Node) Close() {
 			parent.Close()
 		}
 	} else {
-		n.mu.Lock()
-		childs := append([]*Node(nil), n.childs...)
-		n.mu.Unlock()
-
-		for _, child := range childs {
+		for _, child := range n.childList() {
 			child.Close()
 		}
 	}

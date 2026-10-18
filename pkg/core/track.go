@@ -30,7 +30,7 @@ func NewReceiver(media *Media, codec *Codec) *Receiver {
 		r.mu.Lock()
 		r.Bytes += len(packet.Payload)
 		r.Packets++
-		childs := append([]*Node(nil), r.childs...)
+		childs := r.childs // copy-on-write slice, safe to iterate after unlock
 		r.mu.Unlock()
 		for _, child := range childs {
 			child.Input(packet)
