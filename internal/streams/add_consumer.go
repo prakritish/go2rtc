@@ -11,7 +11,8 @@ func (s *Stream) AddConsumer(cons core.Consumer) (err error) {
 	// support for multiple simultaneous pending from different consumers
 	consN := s.pending.Add(1) - 1
 
-	var prodErrors = make([]error, len(s.producers))
+	producers := s.producerList()
+	var prodErrors = make([]error, len(producers))
 	var prodMedias []*core.Media
 	var prodStarts []*Producer
 
@@ -21,7 +22,7 @@ func (s *Stream) AddConsumer(cons core.Consumer) (err error) {
 		log.Trace().Msgf("[streams] check cons=%d media=%s", consN, consMedia)
 
 	producers:
-		for prodN, prod := range s.producers {
+		for prodN, prod := range producers {
 			// check for loop request, ex. `camera1: ffmpeg:camera1`
 			if info, ok := cons.(core.Info); ok && prod.url == info.GetSource() {
 				log.Trace().Msgf("[streams] skip cons=%d prod=%d", consN, prodN)
@@ -103,7 +104,7 @@ func (s *Stream) AddConsumer(cons core.Consumer) (err error) {
 	}
 
 	s.mu.Lock()
-	s.consumers = append(s.consumers, cons)
+	s.appendConsumer(cons)
 	s.mu.Unlock()
 
 	// there may be duplicates, but that's not a problem
