@@ -7,7 +7,7 @@ import (
 )
 
 func AppendDOT(dot []byte, stream *Stream) []byte {
-	for _, prod := range stream.producers {
+	for _, prod := range stream.producerList() {
 		if prod.conn == nil {
 			continue
 		}
@@ -17,7 +17,7 @@ func AppendDOT(dot []byte, stream *Stream) []byte {
 		}
 		dot = c.appendDOT(dot, "producer")
 	}
-	for _, cons := range stream.consumers {
+	for _, cons := range stream.consumerList() {
 		c, err := marshalConn(cons)
 		if err != nil {
 			continue

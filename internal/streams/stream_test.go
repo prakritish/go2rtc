@@ -23,7 +23,7 @@ func TestRecursion(t *testing.T) {
 	// check stream is same
 	require.Equal(t, stream1, stream2)
 	// check stream urls is same
-	require.Equal(t, stream1.producers[0].url, stream2.producers[0].url)
+	require.Equal(t, stream1.producerList()[0].url, stream2.producerList()[0].url)
 	require.Len(t, streams, 2)
 }
 
@@ -38,5 +38,5 @@ func TestTempate(t *testing.T) {
 	require.NoError(t, err)
 
 	require.Equal(t, stream1, stream2)
-	require.Equal(t, "ffmpeg:rtsp://example.com#video=copy", stream1.producers[0].url)
+	require.Equal(t, "ffmpeg:rtsp://example.com#video=copy", stream1.producerList()[0].url)
 }

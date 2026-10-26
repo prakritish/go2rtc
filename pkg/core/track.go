@@ -30,7 +30,7 @@ func NewReceiver(media *Media, codec *Codec) *Receiver {
 		r.mu.Lock()
 		r.Bytes += len(packet.Payload)
 		r.Packets++
-		childs := r.childs // copy-on-write slice, safe to iterate after unlock
+		childs := r.childList() // immutable slice, safe to iterate after unlock
 		r.mu.Unlock()
 		for _, child := range childs {
 			child.Input(packet)
@@ -48,7 +48,7 @@ func (r *Receiver) WriteRTP(packet *rtp.Packet) {
 func (r *Receiver) Senders() []*Sender {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if len(r.childs) > 0 {
+	if len(r.childList()) > 0 {
 		return []*Sender{{}}
 	} else {
 		return nil
@@ -195,7 +195,7 @@ func (r *Receiver) MarshalJSON() ([]byte, error) {
 		Bytes:   r.Bytes,
 		Packets: r.Packets,
 	}
-	for _, child := range r.childs {
+	for _, child := range r.childList() {
 		v.Childs = append(v.Childs, child.id)
 	}
 	r.mu.Unlock()

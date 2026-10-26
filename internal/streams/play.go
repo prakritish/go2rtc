@@ -9,7 +9,7 @@ import (
 
 func (s *Stream) Play(urlOrProd any) error {
 	s.mu.Lock()
-	for _, producer := range s.producers {
+	for _, producer := range s.producerList() {
 		if producer.state == stateInternal && producer.conn != nil {
 			_ = producer.conn.Stop()
 		}
@@ -28,7 +28,7 @@ func (s *Stream) Play(urlOrProd any) error {
 		src = urlOrProd.(core.Producer)
 	}
 
-	for _, producer := range s.producers {
+	for _, producer := range s.producerList() {
 		if producer.conn == nil {
 			continue
 		}
@@ -59,7 +59,7 @@ func (s *Stream) Play(urlOrProd any) error {
 		return nil
 	}
 
-	for _, producer := range s.producers {
+	for _, producer := range s.producerList() {
 		// start new client
 		dst, err := GetProducer(producer.url)
 		if err != nil {
@@ -111,21 +111,25 @@ func (s *Stream) Play(urlOrProd any) error {
 func (s *Stream) AddInternalProducer(conn core.Producer) {
 	producer := &Producer{conn: conn, state: stateInternal, url: "internal"}
 	s.mu.Lock()
-	s.producers = append(s.producers, producer)
+	s.appendProducer(producer)
 	s.mu.Unlock()
 }
 
 func (s *Stream) AddInternalConsumer(conn core.Consumer) {
 	s.mu.Lock()
-	s.consumers = append(s.consumers, conn)
+	s.appendConsumer(conn)
 	s.mu.Unlock()
 }
 
 func (s *Stream) RemoveInternalConsumer(conn core.Consumer) {
 	s.mu.Lock()
-	for i, consumer := range s.consumers {
+	old := s.consumerList()
+	for i, consumer := range old {
 		if consumer == conn {
-			s.consumers = append(s.consumers[:i], s.consumers[i+1:]...)
+			next := make([]core.Consumer, 0, len(old)-1)
+			next = append(next, old[:i]...)
+			next = append(next, old[i+1:]...)
+			s.consumers.Store(&next)
 			break
 		}
 	}
