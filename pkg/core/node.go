@@ -30,7 +30,7 @@ type Node struct {
 	Output HandlerFunc
 
 	id     uint32
-	childs []*Node // copy-on-write: never changed in place, so a reader can iterate it without the lock
+	childs atomic.Pointer[[]*Node] // immutable slice: writers (holding mu) store a fresh one, readers load it without the lock
 	parent *Node
 
 	mu sync.Mutex
@@ -69,7 +69,11 @@ func (n *Node) WithParent(parent *Node) *Node {
 
 func (n *Node) AppendChild(child *Node) {
 	n.mu.Lock()
-	n.childs = append(n.childs[:len(n.childs):len(n.childs)], child) // always a new array
+	old := n.childList()
+	next := make([]*Node, len(old)+1)
+	copy(next, old)
+	next[len(old)] = child
+	n.childs.Store(&next)
 	n.mu.Unlock()
 
 	child.mu.Lock()
@@ -84,20 +88,24 @@ func (n *Node) Parent() *Node {
 	return n.parent
 }
 
-// childList returns the current child nodes, the slice must not be changed
+// childList returns the current child nodes, the slice must not be changed.
+// It is a single atomic load, so it is safe to call with or without holding mu.
 func (n *Node) childList() []*Node {
-	n.mu.Lock()
-	defer n.mu.Unlock()
-	return n.childs
+	if p := n.childs.Load(); p != nil {
+		return *p
+	}
+	return nil
 }
 
 func (n *Node) RemoveChild(child *Node) {
 	n.mu.Lock()
-	for i, ch := range n.childs {
+	old := n.childList()
+	for i, ch := range old {
 		if ch == child {
-			childs := make([]*Node, 0, len(n.childs)-1)
-			childs = append(childs, n.childs[:i]...)
-			n.childs = append(childs, n.childs[i+1:]...)
+			next := make([]*Node, 0, len(old)-1)
+			next = append(next, old[:i]...)
+			next = append(next, old[i+1:]...)
+			n.childs.Store(&next)
 			break
 		}
 	}
@@ -108,11 +116,7 @@ func (n *Node) Close() {
 	if parent := n.Parent(); parent != nil {
 		parent.RemoveChild(n)
 
-		parent.mu.Lock()
-		empty := len(parent.childs) == 0
-		parent.mu.Unlock()
-
-		if empty {
+		if len(parent.childList()) == 0 {
 			parent.Close()
 		}
 	} else {
@@ -124,12 +128,12 @@ func (n *Node) Close() {
 
 func MoveNode(dst, src *Node) {
 	src.mu.Lock()
-	childs := src.childs
-	src.childs = nil
+	childs := src.childList()
+	src.childs.Store(nil)
 	src.mu.Unlock()
 
 	dst.mu.Lock()
-	dst.childs = childs
+	dst.childs.Store(&childs)
 	dst.mu.Unlock()
 
 	for _, child := range childs {
