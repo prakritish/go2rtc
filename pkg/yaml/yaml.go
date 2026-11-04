@@ -63,6 +63,13 @@ func patch(in []byte, path []string, value any) ([]byte, error) {
 	pKey, pVal := findNode(nodes, path[:n])
 	if pKey == nil {
 		// no parent node
+		if value == nil {
+			return in, nil // nothing to delete
+		}
+		if n > 1 {
+			// add the missing parent with the value inside: record.streams.cam1 -> record.streams
+			return patch(in, path[:n], map[string]any{path[n]: value})
+		}
 		return addToEnd(in, path, value)
 	}
 
@@ -100,14 +107,20 @@ func patch(in []byte, path []string, value any) ([]byte, error) {
 
 func findNode(nodes []*yaml.Node, keys []string) (key, value *yaml.Node) {
 	for i, name := range keys {
-		for j := 0; j < len(nodes); j += 2 {
+		found := false
+		for j := 0; j+1 < len(nodes); j += 2 {
 			if nodes[j].Value == name {
-				if i < len(keys)-1 {
-					nodes = nodes[j+1].Content
-					break
+				if i == len(keys)-1 {
+					return nodes[j], nodes[j+1]
 				}
-				return nodes[j], nodes[j+1]
+				nodes = nodes[j+1].Content
+				found = true
+				break
 			}
+		}
+		if !found {
+			// a missing key must not match a key with the same name on another level
+			return nil, nil
 		}
 	}
 	return nil, nil

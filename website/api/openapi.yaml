@@ -588,6 +588,12 @@ paths:
         Creates the stream `name` with the source `src`, or replaces it if it exists, and **saves it to the config file**.
         Repeat `src` to give several sources for one stream (for example a camera and an FFmpeg transcode).
 
+        When the stream exists:
+        - With the **same** sources nothing changes, and connected clients keep playing.
+        - With **new** sources the old stream is closed: connected clients (players, RTSP readers)
+          are disconnected and reach the new source when they reconnect. Recording and preload
+          move to the new source by themselves within a few seconds.
+
         Example: `PUT /api/streams?name=camera6&src=rtsp://user:pass@192.168.1.16/stream1`
       tags: [ Streams ]
       operationId: streamsPut
@@ -630,7 +636,10 @@ paths:
         "400": { description: "`name` missing, unsupported source, or a source that is not allowed from the API." }
     delete:
       summary: Remove a stream (saved to config)
-      description: Removes the stream `src` and **deletes it from the config file**.
+      description: |
+        Removes the stream `src` and **deletes it from the config file**.
+        Connected clients are disconnected. Recording is not stopped: stop it first with
+        `DELETE /api/record`, or it keeps retrying until a stream with this name is added again.
       tags: [ Streams ]
       operationId: streamsDelete
       parameters:

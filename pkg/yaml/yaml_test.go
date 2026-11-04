@@ -98,6 +98,27 @@ func TestPatch(t *testing.T) {
 			value:  []string{"val1"},
 			expect: "streams:\n  camera1: url1\nhomekit:\n  camera1:\n    name: dummy\n    pairings:\n      - val1\n",
 		},
+		{
+			name:   "add to missing parent",
+			src:    "record:\n  path: /rec\nstreams:\n  camera1: url1\n",
+			path:   []string{"record", "streams", "camera1"},
+			value:  "video",
+			expect: "record:\n  path: /rec\n  streams:\n    camera1: video\nstreams:\n  camera1: url1\n",
+		},
+		{
+			name:   "add to missing grandparent",
+			src:    "streams:\n  camera1: url1\n",
+			path:   []string{"record", "streams", "camera1"},
+			value:  "video",
+			expect: "streams:\n  camera1: url1\nrecord:\n  streams:\n    camera1: video\n",
+		},
+		{
+			name:   "remove from missing parent",
+			src:    "streams:\n  camera1: url1\n",
+			path:   []string{"record", "streams", "camera1"},
+			value:  nil,
+			expect: "streams:\n  camera1: url1\n",
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

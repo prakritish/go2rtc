@@ -121,6 +121,18 @@ func (s *Stream) RemoveConsumer(cons core.Consumer) {
 	s.stopProducers()
 }
 
+// close stops all consumers and producers of a stream that was replaced or removed
+func (s *Stream) close() {
+	for _, cons := range s.consumerList() {
+		_ = cons.Stop()
+	}
+	s.mu.Lock()
+	for _, prod := range s.producerList() {
+		prod.stop()
+	}
+	s.mu.Unlock()
+}
+
 func (s *Stream) AddProducer(prod core.Producer) {
 	producer := &Producer{conn: prod, state: stateExternal, url: "external"}
 	s.mu.Lock()
