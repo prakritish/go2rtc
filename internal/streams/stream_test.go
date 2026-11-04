@@ -9,8 +9,11 @@ import (
 )
 
 func TestRecursion(t *testing.T) {
+	// New accepts only sources with a registered scheme
+	HandleFunc("test", func(string) (core.Producer, error) { return nil, nil })
+
 	// create stream with some source
-	stream1, err := New("from_yaml", "does_not_matter")
+	stream1, err := New("from_yaml", "test:does_not_matter")
 	require.NoError(t, err)
 	require.Len(t, streams, 1)
 
@@ -29,6 +32,7 @@ func TestRecursion(t *testing.T) {
 
 func TestTempate(t *testing.T) {
 	HandleFunc("rtsp", func(url string) (core.Producer, error) { return nil, nil }) // bypass HasProducer
+	HandleFunc("ffmpeg", func(url string) (core.Producer, error) { return nil, nil })
 
 	// config from yaml
 	stream1, err := New("camera.from_hass", "ffmpeg:{input}#video=copy")
