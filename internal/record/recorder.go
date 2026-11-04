@@ -11,6 +11,9 @@ import (
 	"github.com/AlexxIT/go2rtc/pkg/record"
 )
 
+// errStreamReplaced - the stream was replaced (PUT /api/streams), re-attach to the new one
+var errStreamReplaced = errors.New("stream replaced")
+
 const (
 	stateConnecting = "connecting"
 	stateRecording  = "recording"
@@ -60,6 +63,11 @@ func (r *recorder) run() {
 		if r.stopped() {
 			log.Info().Msgf("[record] stop stream=%s", r.name)
 			return
+		}
+		if errors.Is(err, errStreamReplaced) {
+			log.Info().Msgf("[record] stream=%s replaced, re-attach", r.name)
+			retry = -1
+			continue
 		}
 
 		log.Warn().Err(err).Msgf("[record] stream=%s retry=%d", r.name, retry)
@@ -129,6 +137,10 @@ func (r *recorder) record() error {
 		case <-holdTicker:
 			r.updateHold()
 		case now := <-ticker.C:
+			if streams.Get(r.name) != stream {
+				stream.RemoveConsumer(cons)
+				return errStreamReplaced
+			}
 			last := cons.LastPacket()
 			if last.IsZero() {
 				last = started

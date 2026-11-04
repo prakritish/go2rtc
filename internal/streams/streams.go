@@ -3,6 +3,7 @@ package streams
 import (
 	"errors"
 	"net/url"
+	"slices"
 	"sync"
 	"time"
 
@@ -113,6 +114,79 @@ func Patch(name string, source string) (*Stream, error) {
 	stream := NewStream(source)
 	streams[name] = stream
 	return stream, nil
+}
+
+// Replace sets the sources of the stream with this name (PUT /api/streams).
+// A stream that already has exactly these sources is kept, so its consumers are not touched.
+// A replaced stream is closed: its consumers disconnect and reconnect to the new sources
+// (the recorder and a preload re-attach by name). A stream that another name links to is
+// not closed.
+func Replace(name string, sources ...string) (*Stream, error) {
+	for _, source := range sources {
+		if !HasProducer(source) {
+			return nil, errors.New("streams: source not supported")
+		}
+		if err := Validate(source); err != nil {
+			return nil, err
+		}
+	}
+
+	streamsMu.Lock()
+	old := streams[name]
+	if old != nil && slices.Equal(old.Sources(), sources) {
+		streamsMu.Unlock()
+		return old, nil
+	}
+	stream := NewStream(sources)
+	streams[name] = stream
+	closeOld := old != nil && !linked(old)
+	streamsMu.Unlock()
+
+	if closeOld {
+		old.close()
+	}
+	if old != nil {
+		repreload(name)
+	}
+	return stream, nil
+}
+
+// Remove deletes the stream with this name (DELETE /api/streams) and closes it,
+// unless another name links to it.
+func Remove(name string) {
+	streamsMu.Lock()
+	old := streams[name]
+	delete(streams, name)
+	closeOld := old != nil && !linked(old)
+	streamsMu.Unlock()
+
+	if closeOld {
+		_ = DelPreload(name)
+		old.close()
+	}
+}
+
+// linked - some stream name still points to this stream, call with streamsMu locked
+func linked(stream *Stream) bool {
+	for _, s := range streams {
+		if s == stream {
+			return true
+		}
+	}
+	return false
+}
+
+// repreload attaches the preload of a replaced stream to the new stream
+func repreload(name string) {
+	preloadsMu.Lock()
+	p := preloads[name]
+	preloadsMu.Unlock()
+	if p == nil {
+		return
+	}
+	if err := AddPreload(name, p.Query); err != nil {
+		log.Error().Err(err).Caller().Send()
+	}
 }
 
 func GetOrPatch(query url.Values) (*Stream, error) {
