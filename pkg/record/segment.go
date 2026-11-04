@@ -99,10 +99,22 @@ func (s *segmentWriter) materialize(dir string) error {
 	return nil
 }
 
-// keyframe returns the size of the first fragment (keyframe moof + mdat) in the GOP data
+// keyframe returns the size of the first fragment (keyframe moof + mdat) in the GOP data.
+// The data always starts with a fragment from our own muxer; if it ever does not, the whole
+// GOP is written as the keyframe chunk (the index then points to its start) instead of a panic.
 func (g *memGOP) keyframe() int {
+	n := len(g.data)
+	if n < 8 {
+		return n
+	}
 	moof := int(binary.BigEndian.Uint32(g.data))
+	if moof < 8 || moof+8 > n {
+		return n
+	}
 	mdat := int(binary.BigEndian.Uint32(g.data[moof:]))
+	if mdat < 8 || moof+mdat > n {
+		return n
+	}
 	return moof + mdat
 }
 
