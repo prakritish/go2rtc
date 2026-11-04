@@ -231,3 +231,90 @@ func TestSetAttachmentAndMethods(t *testing.T) {
 		require.Equal(t, http.StatusOK, rec.Code)
 	}
 }
+
+func TestCatalogUpdateKeepsOrder(t *testing.T) {
+	cat := newCatalog(t.TempDir())
+	base := time.Date(2026, 10, 17, 12, 0, 0, 0, time.UTC)
+	add := func(id string, start int) record.Segment {
+		seg := record.Segment{Stream: "cam", ID: id, Start: base.Add(time.Duration(start) * time.Second)}
+		cat.update(seg)
+		return seg
+	}
+	ids := func() (out []string) {
+		for _, seg := range cat.list("cam", time.Time{}, time.Time{}) {
+			out = append(out, seg.ID)
+		}
+		return
+	}
+
+	add("a", 0)
+	add("b", 60)
+	c := add("c", 120)
+	add("old", -60) // appended out of order
+	require.Equal(t, []string{"old", "a", "b", "c"}, ids())
+
+	// a keyframe update keeps the start
+	c.Size = 1000
+	cat.update(c)
+	require.Equal(t, []string{"old", "a", "b", "c"}, ids())
+
+	// start correction on close moves it
+	c.Start = base.Add(-120 * time.Second)
+	cat.update(c)
+	require.Equal(t, []string{"c", "old", "a", "b"}, ids())
+}
+
+func TestCatalogRemoveClearsTail(t *testing.T) {
+	cat := newCatalog(t.TempDir())
+	base := time.Date(2026, 10, 17, 12, 0, 0, 0, time.UTC)
+	for i := 0; i < 4; i++ {
+		cat.update(record.Segment{Stream: "cam", ID: string(rune('a' + i)), Start: base.Add(time.Duration(i) * time.Minute)})
+	}
+	items := cat.segments["cam"]
+
+	cat.remove(func(seg *record.Segment) bool { return seg.ID == "a" || seg.ID == "c" })
+
+	// the removed segments must not stay reachable from the backing array
+	require.Len(t, cat.segments["cam"], 2)
+	require.Nil(t, items[2])
+	require.Nil(t, items[3])
+}
+
+func TestMaxSizeCleanupRemovesOldestOfAllStreamsInOnePass(t *testing.T) {
+	oldCat, oldCfg := cat, cfg
+	t.Cleanup(func() { cat, cfg = oldCat, oldCfg })
+
+	cat = newCatalog(t.TempDir())
+	cfg.retention = 0
+	cfg.maxSize = 350
+
+	base := time.Date(2026, 10, 17, 12, 0, 0, 0, time.UTC)
+	add := func(stream string, minute int, recording bool) string {
+		start := base.Add(time.Duration(minute) * time.Minute)
+		path := filepath.Join(cat.streamDir(stream), filepath.FromSlash(record.SegmentID(start)))
+		require.NoError(t, os.MkdirAll(filepath.Dir(path), 0755))
+		require.NoError(t, os.WriteFile(path, make([]byte, 100), 0644))
+		cat.update(record.Segment{
+			Stream: stream, ID: record.SegmentID(start), Start: start, Path: path,
+			Size: 100, Duration: time.Minute, Recording: recording,
+		})
+		return path
+	}
+	a0 := add("a", 0, false)
+	b1 := add("b", 1, false)
+	add("a", 2, false)
+	add("b", 3, false)
+	add("a", 4, true) // being recorded, never removed
+	require.Equal(t, int64(500), cat.totalSize())
+
+	cleanup()
+
+	// 150 over the limit: the two oldest of both streams go
+	require.Equal(t, int64(300), cat.totalSize())
+	for _, path := range []string{a0, b1} {
+		_, err := os.Stat(path)
+		require.True(t, os.IsNotExist(err), path)
+	}
+	require.Len(t, cat.list("a", time.Time{}, time.Time{}), 2)
+	require.Len(t, cat.list("b", time.Time{}, time.Time{}), 1)
+}

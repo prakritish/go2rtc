@@ -37,18 +37,15 @@ func cleanup() {
 	}
 
 	if cfg.maxSize > 0 {
-		for cat.totalSize() > cfg.maxSize {
-			oldest := cat.oldest()
-			if oldest == nil {
-				break
-			}
+		// one pass: sum the sizes once and remove all the oldest segments that are over
+		if excess := cat.totalSize() - cfg.maxSize; excess > 0 {
+			paths := cat.oldestFor(excess)
 			count, size := cat.remove(func(seg *record.Segment) bool {
-				return seg.Path == oldest.Path
+				return paths[seg.Path]
 			})
-			if count == 0 {
-				break // can't remove, don't loop forever
+			if count > 0 {
+				log.Debug().Msgf("[record] max_size removed %d segments, %d bytes", count, size)
 			}
-			log.Debug().Msgf("[record] max_size removed %s, %d bytes", oldest.Path, size)
 		}
 	}
 }

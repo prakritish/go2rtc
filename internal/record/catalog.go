@@ -129,13 +129,26 @@ func (c *catalog) update(info record.Segment) {
 	for i := len(items) - 1; i >= 0; i-- {
 		if items[i].ID == info.ID {
 			*items[i] = info
-			sortSegments(items)
+			// called on every keyframe, and the start changes only on close
+			// (start correction), so sort only when the order is broken
+			if outOfOrder(items, i) {
+				sortSegments(items)
+			}
 			return
 		}
 	}
 
-	c.segments[info.Stream] = append(items, &info)
-	sortSegments(c.segments[info.Stream])
+	items = append(items, &info)
+	c.segments[info.Stream] = items
+	if outOfOrder(items, len(items)-1) {
+		sortSegments(items)
+	}
+}
+
+// outOfOrder - item i starts before its predecessor or after its successor
+func outOfOrder(items []*record.Segment, i int) bool {
+	return i > 0 && items[i].Start.Before(items[i-1].Start) ||
+		i+1 < len(items) && items[i+1].Start.Before(items[i].Start)
 }
 
 // list returns copies of segments that overlap [from, to). Zero time means no limit.
@@ -209,6 +222,8 @@ func (c *catalog) remove(match func(seg *record.Segment) bool) (count int, size 
 				keep = append(keep, seg)
 			}
 		}
+		// the filter shares the array: drop the removed segments left in its tail
+		clear(items[len(keep):])
 		if len(keep) == 0 {
 			delete(c.segments, stream)
 		} else {
@@ -232,24 +247,31 @@ func (c *catalog) remove(match func(seg *record.Segment) bool) (count int, size 
 	return
 }
 
-// oldest returns the oldest segment start among all streams (not recording)
-func (c *catalog) oldest() *record.Segment {
+// oldestFor returns the paths of the oldest segments of all streams (not recording)
+// whose sizes add up to at least size, oldest first
+func (c *catalog) oldestFor(size int64) map[string]bool {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 
-	var oldest *record.Segment
-	for _, items := range c.segments {
-		for _, seg := range items {
-			if seg.Recording {
-				continue
+	var items []*record.Segment
+	for _, stream := range c.segments {
+		for _, seg := range stream {
+			if !seg.Recording {
+				items = append(items, seg)
 			}
-			if oldest == nil || seg.Start.Before(oldest.Start) {
-				oldest = seg
-			}
-			break // sorted, first non-recording item is the oldest
 		}
 	}
-	return oldest
+	sortSegments(items)
+
+	paths := map[string]bool{}
+	for _, seg := range items {
+		if size <= 0 {
+			break
+		}
+		paths[seg.Path] = true
+		size -= seg.Size
+	}
+	return paths
 }
 
 func sortSegments(items []*record.Segment) {
