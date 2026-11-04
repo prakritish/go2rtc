@@ -22,8 +22,8 @@ func TestSenser(t *testing.T) {
 	sender.Input(&Packet{})
 	sender.Input(&Packet{})
 
-	require.Equal(t, 2, sender.Packets)
-	require.Equal(t, 0, sender.Drops)
+	require.Equal(t, int64(2), sender.Packets.Load())
+	require.Equal(t, int64(0), sender.Drops.Load())
 
 	// important to read one before close
 	// because goroutine in Start() can run with nil chan
@@ -36,8 +36,8 @@ func TestSenser(t *testing.T) {
 
 	sender.Input(&Packet{})
 
-	require.Equal(t, 2, sender.Packets)
-	require.Equal(t, 1, sender.Drops)
+	require.Equal(t, int64(2), sender.Packets.Load())
+	require.Equal(t, int64(1), sender.Drops.Load())
 
 	// read 2nd
 	_, ok = <-recv

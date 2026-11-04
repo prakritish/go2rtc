@@ -126,6 +126,8 @@ func (n *Node) Close() {
 	}
 }
 
+// MoveNode moves all children of src to dst. It replaces the children of dst, so dst must
+// have none: it is used on reconnect, where dst is the new producer's fresh receiver.
 func MoveNode(dst, src *Node) {
 	src.mu.Lock()
 	childs := src.childList()

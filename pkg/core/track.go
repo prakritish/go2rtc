@@ -3,6 +3,7 @@ package core
 import (
 	"encoding/json"
 	"errors"
+	"sync/atomic"
 
 	"github.com/pion/rtp"
 )
@@ -17,8 +18,9 @@ type Receiver struct {
 	// Deprecated: should be removed
 	ID byte `json:"-"` // Channel for RTSP, PayloadType for MPEG-TS
 
-	Bytes   int `json:"bytes,omitempty"`
-	Packets int `json:"packets,omitempty"`
+	// atomic, so the packet path takes no lock
+	Bytes   atomic.Int64
+	Packets atomic.Int64
 }
 
 func NewReceiver(media *Media, codec *Codec) *Receiver {
@@ -27,12 +29,10 @@ func NewReceiver(media *Media, codec *Codec) *Receiver {
 		Media: media,
 	}
 	r.Input = func(packet *Packet) {
-		r.mu.Lock()
-		r.Bytes += len(packet.Payload)
-		r.Packets++
-		childs := r.childList() // immutable slice, safe to iterate after unlock
-		r.mu.Unlock()
-		for _, child := range childs {
+		r.Bytes.Add(int64(len(packet.Payload)))
+		r.Packets.Add(1)
+		// immutable slice from an atomic load, no lock needed
+		for _, child := range r.childList() {
 			child.Input(packet)
 		}
 	}
@@ -72,9 +72,10 @@ type Sender struct {
 	// Deprecated:
 	Handler HandlerFunc `json:"-"`
 
-	Bytes   int `json:"bytes,omitempty"`
-	Packets int `json:"packets,omitempty"`
-	Drops   int `json:"drops,omitempty"`
+	// atomic, so MarshalJSON can read them while packets flow
+	Bytes   atomic.Int64
+	Packets atomic.Int64
+	Drops   atomic.Int64
 
 	buf  chan *Packet
 	done chan struct{}
@@ -106,10 +107,10 @@ func NewSender(media *Media, codec *Codec) *Sender {
 		// unblock write to nil chan - OK, write to closed chan - panic
 		select {
 		case s.buf <- packet:
-			s.Bytes += len(packet.Payload)
-			s.Packets++
+			s.Bytes.Add(int64(len(packet.Payload)))
+			s.Packets.Add(1)
 		default:
-			s.Drops++
+			s.Drops.Add(1)
 		}
 		s.mu.Unlock()
 	}
@@ -182,23 +183,21 @@ func (s *Sender) Close() {
 }
 
 func (r *Receiver) MarshalJSON() ([]byte, error) {
-	r.mu.Lock()
 	v := struct {
 		ID      uint32   `json:"id"`
 		Codec   *Codec   `json:"codec"`
 		Childs  []uint32 `json:"childs,omitempty"`
-		Bytes   int      `json:"bytes,omitempty"`
-		Packets int      `json:"packets,omitempty"`
+		Bytes   int64    `json:"bytes,omitempty"`
+		Packets int64    `json:"packets,omitempty"`
 	}{
 		ID:      r.Node.id,
 		Codec:   r.Node.Codec,
-		Bytes:   r.Bytes,
-		Packets: r.Packets,
+		Bytes:   r.Bytes.Load(),
+		Packets: r.Packets.Load(),
 	}
 	for _, child := range r.childList() {
 		v.Childs = append(v.Childs, child.id)
 	}
-	r.mu.Unlock()
 	return json.Marshal(v)
 }
 
@@ -207,15 +206,15 @@ func (s *Sender) MarshalJSON() ([]byte, error) {
 		ID      uint32 `json:"id"`
 		Codec   *Codec `json:"codec"`
 		Parent  uint32 `json:"parent,omitempty"`
-		Bytes   int    `json:"bytes,omitempty"`
-		Packets int    `json:"packets,omitempty"`
-		Drops   int    `json:"drops,omitempty"`
+		Bytes   int64  `json:"bytes,omitempty"`
+		Packets int64  `json:"packets,omitempty"`
+		Drops   int64  `json:"drops,omitempty"`
 	}{
 		ID:      s.Node.id,
 		Codec:   s.Node.Codec,
-		Bytes:   s.Bytes,
-		Packets: s.Packets,
-		Drops:   s.Drops,
+		Bytes:   s.Bytes.Load(),
+		Packets: s.Packets.Load(),
+		Drops:   s.Drops.Load(),
 	}
 	if parent := s.Parent(); parent != nil {
 		v.Parent = parent.id
