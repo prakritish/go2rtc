@@ -1,0 +1,505 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>recordings - go2rtc</title>
+    <style>
+        .controls {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 10px;
+            align-items: center;
+        }
+
+        .info {
+            color: #888;
+        }
+
+        .error {
+            color: #c00;
+        }
+
+        video {
+            width: 100%;
+            max-height: 70vh;
+            background: black;
+        }
+
+        .timeline {
+            position: relative;
+            height: 40px;
+            background: #eee;
+            border: 1px solid #ccc;
+            border-radius: 4px;
+            cursor: pointer;
+            user-select: none;
+        }
+
+        .timeline div {
+            position: absolute;
+            top: 0;
+            bottom: 0;
+        }
+
+        .timeline .range {
+            background: #4caf50;
+            min-width: 1px;
+        }
+
+        .timeline .event {
+            background: #ff9800;
+            min-width: 2px;
+            top: 26px;
+        }
+
+        .timeline .playhead {
+            background: #e00;
+            width: 2px;
+            display: none;
+        }
+
+        .timeline .hover {
+            background: #333;
+            width: 1px;
+            display: none;
+        }
+
+        .ticks {
+            position: relative;
+            height: 16px;
+            font-size: 12px;
+            color: #666;
+        }
+
+        .ticks span {
+            position: absolute;
+            transform: translateX(-50%);
+        }
+
+        .ticks span:first-child {
+            transform: none;
+        }
+    </style>
+</head>
+<body>
+
+<script src="main.js"></script>
+
+<main>
+    <table>
+        <thead>
+        <tr>
+            <th>stream</th>
+            <th>state</th>
+            <th>size</th>
+            <th>last data</th>
+            <th>commands</th>
+        </tr>
+        </thead>
+        <tbody id="streams"></tbody>
+    </table>
+
+    <div class="controls">
+        <select id="src"></select>
+        <button id="prev" title="previous day">&lt;</button>
+        <input id="day" type="date">
+        <button id="next" title="next day">&gt;</button>
+        <input id="time" type="time" step="1">
+        clip
+        <select id="duration" title="clip length">
+            <option value="60">1 min</option>
+            <option value="300">5 min</option>
+            <option value="900" selected>15 min</option>
+            <option value="3600">1 hour</option>
+        </select>
+        zoom
+        <select id="zoom" title="timeline zoom">
+            <option value="86400" selected>24 h</option>
+            <option value="21600">6 h</option>
+            <option value="3600">1 h</option>
+            <option value="600">10 min</option>
+        </select>
+        <button id="play">play</button>
+        <a id="download" href="#">download</a>
+        <a id="live" href="#">live</a>
+    </div>
+
+    <div>
+        <div id="timeline" class="timeline">
+            <div id="hover" class="hover"></div>
+            <div id="playhead" class="playhead"></div>
+        </div>
+        <div id="ticks" class="ticks"></div>
+    </div>
+
+    <div id="status" class="info">Click the timeline to play the recording from that time.</div>
+
+    <video id="video" controls playsinline muted></video>
+
+    <table>
+        <thead>
+        <tr>
+            <th>event</th>
+            <th>start</th>
+            <th>end</th>
+            <th>commands</th>
+        </tr>
+        </thead>
+        <tbody id="events"></tbody>
+    </table>
+</main>
+
+<script>
+    // Recording viewer: the day timeline of a recorded stream, playback with api/record/video.mp4.
+    // Times are shown in the browser time zone, the API gets them in UTC.
+    const $ = id => document.getElementById(id);
+    const video = $('video');
+    const timeline = $('timeline');
+
+    let ranges = [];  // recorded ranges of the day: [{start, end}] in ms
+    let events = [];  // events of the day: [{id, label, start, end}] in ms, end is null in progress
+    let clip = null;  // playing clip: {start, end, ranges} in ms
+    let center = null;  // center of the zoomed timeline, the selected time if null
+
+    const DAY = 24 * 3600 * 1000;
+
+    function apiURL(path, params) {
+        const url = new URL('api/record/' + path, location.href);
+        for (const [k, v] of Object.entries(params)) url.searchParams.set(k, v);
+        return url.toString();
+    }
+
+    function escapeHTML(s) {
+        return s.replace(/[&<>"']/g, c => `&#${c.charCodeAt(0)};`);
+    }
+
+    function formatSize(n) {
+        const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+        let i = 0;
+        for (; n >= 1024 && i < units.length - 1; i++) n /= 1024;
+        return `${n.toFixed(i ? 1 : 0)} ${units[i]}`;
+    }
+
+    function formatTime(ms) {
+        return new Date(ms).toLocaleTimeString([], {hour12: false});
+    }
+
+    // local midnight of the selected day
+    function dayStart() {
+        const [y, m, d] = $('day').value.split('-').map(Number);
+        return new Date(y, m - 1, d).getTime();
+    }
+
+    function setDay(ms) {
+        const d = new Date(ms);
+        const pad = n => String(n).padStart(2, '0');
+        $('day').value = `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+    }
+
+    // the day can be 23 or 25 hours long on a DST change
+    function dayEnd() {
+        const d = new Date(dayStart());
+        d.setDate(d.getDate() + 1);
+        return d.getTime();
+    }
+
+    // the visible part of the day: all of it, or the zoom window around the selected time
+    function view() {
+        const from = dayStart(), to = dayEnd();
+        const size = $('zoom').value * 1000;
+        if (size >= to - from) return [from, to];
+        const start = Math.min(Math.max((center ?? selectedTime()) - size / 2, from), to - size);
+        return [start, start + size];
+    }
+
+    function percent(ms) {
+        const [from, to] = view();
+        return Math.min(100, Math.max(0, (ms - from) * 100 / (to - from)));
+    }
+
+    function timeAt(ev) {
+        const [from, to] = view();
+        const rect = timeline.getBoundingClientRect();
+        return from + (ev.clientX - rect.left) / rect.width * (to - from);
+    }
+
+    function place(el, from, to) {
+        el.style.left = percent(from) + '%';
+        if (to !== undefined) el.style.width = (percent(to) - percent(from)) + '%';
+    }
+
+    async function getJSON(url) {
+        const r = await fetch(url, {cache: 'no-cache'});
+        if (!r.ok) throw new Error(`${r.status} ${(await r.text()).trim()}`);
+        return r.json();
+    }
+
+    async function loadStreams() {
+        const data = await getJSON(new URL('api/record', location.href));
+        const names = [...new Set([...Object.keys(data.streams || {}), ...Object.keys(data.sizes || {})])].sort();
+
+        $('streams').innerHTML = names.map(name => {
+            const rec = (data.streams || {})[name];
+            const state = rec ? `${rec.state}${rec.mode === 'events' ? ' (events)' : ''}` : 'not recording';
+            const last = rec && rec.last_packet ? new Date(rec.last_packet).toLocaleString() : '';
+            const err = rec && rec.error ? `<div class="error">${escapeHTML(rec.error)}</div>` : '';
+            const n = escapeHTML(name);
+            return `<tr><td>${n}</td><td>${escapeHTML(state)}${err}</td>` +
+                `<td>${formatSize((data.sizes || {})[name] || 0)}</td><td>${last}</td>` +
+                `<td><a href="#" data-name="${n}">view</a></td></tr>`;
+        }).join('');
+
+        const total = `total: ${formatSize(data.total_size)}` +
+            (data.max_size ? ` of ${formatSize(data.max_size)}` : '') +
+            (data.retention ? ` / retention: ${+(data.retention / 86400).toFixed(2)} days` : '');
+        $('streams').insertAdjacentHTML('beforeend', `<tr><td colspan="5" class="info">${total}</td></tr>`);
+
+        const select = $('src');
+        const current = select.value;
+        select.innerHTML = names.map(n => `<option>${escapeHTML(n)}</option>`).join('');
+        if (names.includes(current)) select.value = current;
+    }
+
+    async function loadTimeline() {
+        const src = $('src').value;
+        ranges = [];
+        events = [];
+        if (src) {
+            const data = await getJSON(apiURL('timeline', {
+                src, start: new Date(dayStart()).toISOString(), end: new Date(dayEnd()).toISOString(),
+            }));
+            ranges = data.ranges.map(r => ({start: Date.parse(r.start), end: Date.parse(r.end)}));
+            events = data.events.map(ev => ({
+                id: ev.id, label: ev.label, start: Date.parse(ev.start), end: ev.end ? Date.parse(ev.end) : null,
+            }));
+        }
+
+        $('events').innerHTML = events.map(ev => {
+            const url = apiURL('video.mp4', {src, event: ev.id});
+            return `<tr><td>${escapeHTML(ev.label || ev.id)}</td><td>${formatTime(ev.start)}</td>` +
+                `<td>${ev.end ? formatTime(ev.end) : 'in progress'}</td>` +
+                `<td><a href="#" data-event="${escapeHTML(ev.id)}">play</a> / ` +
+                `<a href="${url}&filename=${encodeURIComponent(ev.id + '.mp4')}">download</a></td></tr>`;
+        }).join('') || '<tr><td colspan="4" class="info">no events this day</td></tr>';
+
+        $('live').href = 'stream.html?src=' + encodeURIComponent(src);
+        updateDownload();
+        draw();
+    }
+
+    function draw() {
+        timeline.querySelectorAll('.range, .event').forEach(el => el.remove());
+        const [from, to] = view();
+        const add = (cls, title, start, end) => {
+            if (end <= from || start >= to) return;
+            const el = document.createElement('div');
+            el.className = cls;
+            el.title = title;
+            place(el, start, end);
+            timeline.insertBefore(el, $('hover'));
+        };
+        for (const r of ranges) add('range', `${formatTime(r.start)} - ${formatTime(r.end)}`, r.start, r.end);
+        for (const ev of events) add('event', `${ev.label || 'event'} ${formatTime(ev.start)}`, ev.start, ev.end || Date.now());
+        drawTicks();
+        drawPlayhead();
+    }
+
+    // the time in the time input, on the selected day
+    function selectedTime() {
+        const [h, m, s] = ($('time').value || '00:00:00').split(':').map(Number);
+        const d = new Date(dayStart());
+        d.setHours(h, m, s || 0);
+        return d.getTime();
+    }
+
+    function setTime(ms) {
+        $('time').value = new Date(ms).toLocaleTimeString('en-GB', {hour12: false});
+    }
+
+    function updateDownload() {
+        const start = selectedTime();
+        $('download').href = apiURL('video.mp4', {
+            src: $('src').value,
+            start: new Date(start).toISOString(),
+            duration: $('duration').value,
+            filename: `${$('src').value.replace(/[^\w.-]+/g, '_')}_${new Date(start).toISOString()}.mp4`,
+        });
+    }
+
+    // a time in a gap moves to the start of the next recorded range
+    function recordedFrom(ms) {
+        const r = ranges.find(r => r.end > ms);
+        return r && r.start > ms ? r.start : ms;
+    }
+
+    async function play(params) {
+        const url = apiURL('video.mp4', {src: $('src').value, ...params});
+        $('status').innerText = 'loading...';
+        const r = await fetch(url, {method: 'HEAD', cache: 'no-cache'});
+        if (!r.ok) {
+            $('status').innerText = r.status === 404 ? 'No recording at this time.' : `Error: ${r.status}`;
+            return;
+        }
+        const start = Date.parse(r.headers.get('X-Record-Start'));
+        const end = Date.parse(r.headers.get('X-Record-End'));
+        // the clip skips gaps, so its media time is mapped to real time with the recorded ranges
+        clip = {
+            start, end, ranges: ranges
+                .filter(x => x.end > start && x.start < end)
+                .map(x => ({start: Math.max(x.start, start), end: Math.min(x.end, end)})),
+        };
+        const gaps = +r.headers.get('X-Record-Gaps') || 0;
+        $('status').innerText = `${formatTime(start)} - ${formatTime(end)}` +
+            (gaps ? ` (${gaps} gap${gaps > 1 ? 's' : ''} skipped)` : '') +
+            (r.headers.has('X-Record-Truncated') ? ', ends early: the codec changed' : '');
+        video.src = url;
+        video.play().catch(() => {
+        });
+    }
+
+    // moves the zoomed timeline when the time is not visible
+    function show(ms) {
+        const [from, to] = view();
+        if (ms >= from && ms < to) return false;
+        center = ms;
+        draw();
+        return true;
+    }
+
+    function playAt(ms) {
+        ms = recordedFrom(ms);
+        if (center === null) {
+            // keep the zoomed timeline in place, it follows the selected time otherwise
+            const [from, to] = view();
+            center = (from + to) / 2;
+        }
+        setTime(ms);
+        show(ms);
+        updateDownload();
+        play({start: new Date(ms).toISOString(), duration: $('duration').value});
+    }
+
+    function realTime(mediaSec) {
+        let left = mediaSec * 1000;
+        for (const r of clip.ranges) {
+            if (left <= r.end - r.start) return r.start + left;
+            left -= r.end - r.start;
+        }
+        return clip.start + mediaSec * 1000;
+    }
+
+    function drawPlayhead() {
+        const head = $('playhead');
+        const ms = clip ? realTime(video.currentTime) : NaN;
+        const [from, to] = view();
+        head.style.display = ms >= from && ms < to ? 'block' : 'none';
+        place(head, ms);
+        // follow the playback
+        if (!video.paused && ms >= to && ms < dayEnd()) show(ms);
+    }
+
+    video.addEventListener('timeupdate', drawPlayhead);
+
+    // continue with the next clip
+    video.addEventListener('ended', () => {
+        if (!clip || clip.event) return;
+        const next = ranges.find(r => r.end > clip.end + 1000);
+        if (next) playAt(Math.max(next.start, clip.end));
+    });
+
+    timeline.addEventListener('mousemove', ev => {
+        const ms = timeAt(ev);
+        const hover = $('hover');
+        hover.style.display = 'block';
+        hover.title = formatTime(ms);
+        timeline.title = formatTime(ms);
+        place(hover, ms);
+    });
+
+    timeline.addEventListener('mouseleave', () => $('hover').style.display = 'none');
+
+    timeline.addEventListener('click', ev => playAt(timeAt(ev)));
+
+    $('streams').addEventListener('click', ev => {
+        const name = ev.target.dataset.name;
+        if (name === undefined) return;
+        ev.preventDefault();
+        $('src').value = name;
+        loadTimeline().catch(showError);
+    });
+
+    $('events').addEventListener('click', ev => {
+        const id = ev.target.dataset.event;
+        if (id === undefined) return;
+        ev.preventDefault();
+        play({event: id}).then(() => clip && (clip.event = true)).catch(showError);
+    });
+
+    $('play').addEventListener('click', () => playAt(selectedTime()));
+    $('src').addEventListener('change', () => loadTimeline().catch(showError));
+    $('day').addEventListener('change', () => {
+        center = null;
+        loadTimeline().catch(showError);
+    });
+    $('time').addEventListener('change', () => {
+        center = null;
+        updateDownload();
+        draw();
+    });
+    $('zoom').addEventListener('change', () => {
+        center = clip ? realTime(video.currentTime) : null;
+        draw();
+    });
+    $('duration').addEventListener('change', updateDownload);
+
+    for (const [id, days] of [['prev', -1], ['next', 1]]) {
+        $(id).addEventListener('click', () => {
+            const d = new Date(dayStart());
+            d.setDate(d.getDate() + days);
+            setDay(d.getTime());
+            center = null;
+            loadTimeline().catch(showError);
+        });
+    }
+
+    function showError(err) {
+        $('status').innerText = `Error: ${err.message}`;
+    }
+
+    function drawTicks() {
+        const [from, to] = view();
+        // up to 10 ticks, on round local times
+        const steps = [60, 300, 600, 1800, 3600, 3 * 3600].map(s => s * 1000);
+        const step = steps.find(s => (to - from) / s <= 10) || steps[steps.length - 1];
+        const offset = new Date(from).getTimezoneOffset() * 60000;
+        let html = '';
+        for (let t = Math.ceil((from - offset) / step) * step + offset; t < to; t += step) {
+            const label = new Date(t).toLocaleTimeString([], {hour: '2-digit', minute: '2-digit', hour12: false});
+            html += `<span style="left:${percent(t)}%">${label}</span>`;
+        }
+        $('ticks').innerHTML = html;
+    }
+
+    // http://192.168.1.123:1984/record.html?src=camera1
+    const params = new URLSearchParams(location.search);
+    setDay(Date.now());
+    setTime(Date.now() - 300 * 1000);
+    drawTicks();
+
+    loadStreams()
+        .then(() => {
+            if (params.has('src')) $('src').value = params.get('src');
+            return loadTimeline();
+        })
+        .catch(showError);
+
+    // new recorded data of today
+    setInterval(() => {
+        loadStreams().catch(showError);
+        if (Date.now() < dayEnd() && Date.now() >= dayStart()) loadTimeline().catch(showError);
+    }, 30000);
+</script>
+
+</body>
+</html>

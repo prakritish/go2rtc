@@ -11,6 +11,13 @@ Without transcoding.
 - A small `.idx` sidecar file stores the time and byte offset of each keyframe for fast seeking
 - The filesystem is the only storage, the catalog is rebuilt on startup (no database)
 
+## WebUI
+
+The **recordings** page of the WebUI (`http://192.168.1.123:1984/record.html`) shows the recorded streams with
+their state and size, a day timeline of the recorded time (green) and events (orange) of a stream, plays the
+recording from the clicked time and downloads a time range or an event. It uses the API below
+(`video.mp4` with HTTP Range), so it works in every browser without plugins. Times are in the browser time zone.
+
 ## Configuration
 
 For a production Docker image, Compose file and sample config see [docker/record](../../docker/record/README.md).

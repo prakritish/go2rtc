@@ -6,6 +6,8 @@ This folder contains static HTTP and JS content that is embedded into the applic
 
 `www/swagger/` - API documentation (Swagger UI) at `http://localhost:1984/swagger/`. The spec `www/swagger/openapi.yaml` is a copy of [website/api/openapi.yaml](../website/api/openapi.yaml), keep them the same (checked by a test). Swagger UI (Apache 2.0) is bundled, so it works without internet.
 
+`www/record.html` - recordings viewer (the record module): status and size of the recorded streams, a day timeline of the recorded time and events, playback from any time on the timeline and download of a time range or an event. Open a stream directly with `record.html?src=camera1`.
+
 `www/stream.html` - universal viewer with support params in URL:
 
 - multiple streams on page `src=camera1&src=camera2...`
