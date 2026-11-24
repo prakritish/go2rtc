@@ -161,6 +161,7 @@
     let events = [];  // events of the day: [{id, label, start, end}] in ms, end is null in progress
     let clip = null;  // playing clip: {start, end, ranges} in ms
     let center = null;  // center of the zoomed timeline, the selected time if null
+    let codecs = {};  // codecs of the segment being recorded: {name: 'avc1.640029,mp4a.40.2'}
 
     const DAY = 24 * 3600 * 1000;
 
@@ -241,6 +242,7 @@
 
         $('streams').innerHTML = names.map(name => {
             const rec = (data.streams || {})[name];
+            if (rec && rec.segment) codecs[name] = rec.segment.codecs;
             const state = rec ? `${rec.state}${rec.mode === 'events' ? ' (events)' : ''}` : 'not recording';
             const last = rec && rec.last_packet ? new Date(rec.last_packet).toLocaleString() : '';
             const err = rec && rec.error ? `<div class="error">${escapeHTML(rec.error)}</div>` : '';
@@ -333,12 +335,32 @@
         return r && r.start > ms ? r.start : ms;
     }
 
+    function setStatus(text, error) {
+        $('status').innerText = text;
+        $('status').className = error ? 'error' : 'info';
+    }
+
+    // the video codec of the stream, if the browser can't play it
+    function unsupportedCodec(src) {
+        const codec = (codecs[src] || '').split(',').find(c => /^(avc|hvc|hev|av01|vp)/.test(c));
+        if (!codec || video.canPlayType(`video/mp4; codecs="${codec}"`)) return null;
+        return /^(hvc|hev)/.test(codec) ? 'H.265' : codec;
+    }
+
+    function codecError(codec) {
+        setStatus(codec ? `This browser can't play ${codec} video. Download the clip and play it in a player ` +
+            `like VLC, or use a browser with ${codec} support (Safari, or Chrome and Edge with hardware decoding).` :
+            `This browser can't play the video. Download the clip and play it in a player like VLC.`, true);
+    }
+
     async function play(params) {
-        const url = apiURL('video.mp4', {src: $('src').value, ...params});
-        $('status').innerText = 'loading...';
+        const src = $('src').value;
+        const url = apiURL('video.mp4', {src, ...params});
+        setStatus('loading...');
         const r = await fetch(url, {method: 'HEAD', cache: 'no-cache'});
         if (!r.ok) {
-            $('status').innerText = r.status === 404 ? 'No recording at this time.' : `Error: ${r.status}`;
+            setStatus(r.status === 404 ? 'No recording at this time, click a green part of the timeline.' :
+                `Error: ${r.status} ${r.statusText}`, true);
             return;
         }
         const start = Date.parse(r.headers.get('X-Record-Start'));
@@ -350,13 +372,33 @@
                 .map(x => ({start: Math.max(x.start, start), end: Math.min(x.end, end)})),
         };
         const gaps = +r.headers.get('X-Record-Gaps') || 0;
-        $('status').innerText = `${formatTime(start)} - ${formatTime(end)}` +
+        setStatus(`playing ${formatTime(start)} - ${formatTime(end)}` +
             (gaps ? ` (${gaps} gap${gaps > 1 ? 's' : ''} skipped)` : '') +
-            (r.headers.has('X-Record-Truncated') ? ', ends early: the codec changed' : '');
+            (r.headers.has('X-Record-Truncated') ? ', ends early: the codec changed' : ''));
+        const codec = unsupportedCodec(src);
+        if (codec) {
+            codecError(codec);
+            video.removeAttribute('src');
+            video.load();
+            return;
+        }
         video.src = url;
         video.play().catch(() => {
         });
     }
+
+    // the video can be below the timeline on small screens
+    video.addEventListener('loadedmetadata', () => video.scrollIntoView({block: 'nearest', behavior: 'smooth'}));
+
+    video.addEventListener('error', () => {
+        if (!video.error || !video.getAttribute('src')) return;
+        const err = video.error;
+        if (err.code === err.MEDIA_ERR_SRC_NOT_SUPPORTED || err.code === err.MEDIA_ERR_DECODE) {
+            codecError(unsupportedCodec($('src').value));
+        } else {
+            setStatus(`Error: ${err.message || 'the video can\'t be played'}`, true);
+        }
+    });
 
     // moves the zoomed timeline when the time is not visible
     function show(ms) {
@@ -377,7 +419,7 @@
         setTime(ms);
         show(ms);
         updateDownload();
-        play({start: new Date(ms).toISOString(), duration: $('duration').value});
+        play({start: new Date(ms).toISOString(), duration: $('duration').value}).catch(showError);
     }
 
     function realTime(mediaSec) {
@@ -464,7 +506,7 @@
     }
 
     function showError(err) {
-        $('status').innerText = `Error: ${err.message}`;
+        setStatus(`Error: ${err.message}`, true);
     }
 
     function drawTicks() {
