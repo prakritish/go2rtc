@@ -35,12 +35,21 @@ record:
   max_event: 1h                     # event in progress is ended automatically (default 1h, 0 - never)
   hls_segment: 4s                   # min HLS segment duration (default 4s)
   ffmpeg_jobs: 2                    # max simultaneous FFmpeg jobs for format=mp4 and exact (default 2)
+  delete_jobs: 16                   # parallel file deletions for retention and max_size (default 16)
   streams:
     camera1: video&audio            # all supported codecs (default)
     camera2: video                  # video only
     camera3: video=h264&audio=aac   # specific codecs
     camera4: video&audio&mode=events  # keep only the recording around events
 ```
+
+### Retention
+
+- Checked on start and then every minute: segments that ended more than `retention` ago are deleted, then the
+  oldest segments of all streams while the total size is over `max_size`. Segments being recorded are never deleted.
+- Whole segments are deleted, so a recording can stay up to a minute plus one `segment` longer than `retention`.
+- `delete_jobs` files are deleted at a time. On network storage (NFS, SMB) every deletion waits for the server,
+  so with many streams and short segments raise it until the deletion keeps up with the recording.
 
 ### Events mode
 

@@ -318,3 +318,59 @@ func TestMaxSizeCleanupRemovesOldestOfAllStreamsInOnePass(t *testing.T) {
 	require.Len(t, cat.list("a", time.Time{}, time.Time{}), 2)
 	require.Len(t, cat.list("b", time.Time{}, time.Time{}), 1)
 }
+
+func TestCatalogRemoveParallel(t *testing.T) {
+	for _, jobs := range []int{1, 8, 1000} {
+		cat := newCatalog(t.TempDir())
+		cat.jobs = jobs
+
+		base := time.Date(2026, 10, 17, 0, 0, 0, 0, time.UTC)
+		var old, kept []string
+		for _, stream := range []string{"a", "b", "c"} {
+			for day := 0; day < 2; day++ {
+				for i := 0; i < 50; i++ {
+					start := base.Add(time.Duration(day)*24*time.Hour + time.Duration(i)*time.Minute)
+					path := filepath.Join(cat.streamDir(stream), filepath.FromSlash(record.SegmentID(start)))
+					require.NoError(t, os.MkdirAll(filepath.Dir(path), 0755))
+					require.NoError(t, os.WriteFile(path, make([]byte, 10), 0644))
+					require.NoError(t, os.WriteFile(record.IndexPath(path), nil, 0644))
+					cat.update(record.Segment{Stream: stream, ID: record.SegmentID(start), Start: start, Path: path, Size: 10, Duration: time.Minute})
+					if day == 0 {
+						old = append(old, path)
+					} else {
+						kept = append(kept, path)
+					}
+				}
+			}
+		}
+
+		// a segment that can't be removed (a non-empty dir in place of the file) is not counted
+		bad := filepath.Join(cat.streamDir("a"), "2026-10-17", "bad.mp4")
+		require.NoError(t, os.MkdirAll(bad, 0755))
+		require.NoError(t, os.WriteFile(filepath.Join(bad, "x"), nil, 0644))
+		cat.update(record.Segment{Stream: "a", ID: "bad", Start: base.Add(-time.Minute), Path: bad, Size: 10})
+
+		cutoff := base.Add(24 * time.Hour)
+		count, size := cat.remove(func(seg *record.Segment) bool { return seg.Start.Before(cutoff) })
+		require.Equal(t, len(old), count, "jobs=%d", jobs)
+		require.Equal(t, int64(10*len(old)), size)
+
+		for _, path := range old {
+			_, err := os.Stat(path)
+			require.True(t, os.IsNotExist(err), path)
+			_, err = os.Stat(record.IndexPath(path))
+			require.True(t, os.IsNotExist(err), path)
+		}
+		for _, path := range kept {
+			require.FileExists(t, path)
+		}
+
+		// the date dir is removed once empty, and kept when the bad segment is still in it
+		for _, stream := range []string{"b", "c"} {
+			_, err := os.Stat(filepath.Join(cat.streamDir(stream), "2026-10-17"))
+			require.True(t, os.IsNotExist(err), stream)
+		}
+		require.DirExists(t, bad)
+		require.Len(t, cat.list("a", time.Time{}, time.Time{}), 50)
+	}
+}

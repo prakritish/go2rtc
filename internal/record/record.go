@@ -29,6 +29,7 @@ func Init() {
 			MaxEvent     string            `yaml:"max_event"`
 			HLSSegment   string            `yaml:"hls_segment"`
 			FFmpegJobs   int               `yaml:"ffmpeg_jobs"`
+			DeleteJobs   int               `yaml:"delete_jobs"`
 			MaxSize      string            `yaml:"max_size"`
 			Streams      map[string]string `yaml:"streams"`
 		} `yaml:"record"`
@@ -46,6 +47,7 @@ func Init() {
 	conf.Mod.MaxEvent = "1h"
 	conf.Mod.HLSSegment = "4s"
 	conf.Mod.FFmpegJobs = 2
+	conf.Mod.DeleteJobs = defaultDeleteJobs
 	conf.FFmpeg.Bin = "ffmpeg"
 
 	app.LoadConfig(&conf)
@@ -89,6 +91,11 @@ func Init() {
 	_ = os.RemoveAll(tmpDir())
 
 	cat = newCatalog(cfg.path)
+	if conf.Mod.DeleteJobs >= 1 {
+		cat.jobs = conf.Mod.DeleteJobs
+	} else {
+		log.Warn().Msgf("[record] wrong delete_jobs: %d", conf.Mod.DeleteJobs)
+	}
 	if err = cat.scan(); err != nil {
 		log.Error().Err(err).Caller().Send()
 	}

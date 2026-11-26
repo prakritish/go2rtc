@@ -6,6 +6,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/AlexxIT/go2rtc/pkg/record"
@@ -17,10 +18,13 @@ type catalog struct {
 	root     string
 	segments map[string][]*record.Segment
 	mu       sync.RWMutex
+	jobs     int // parallel file removals
 }
 
+const defaultDeleteJobs = 16
+
 func newCatalog(root string) *catalog {
-	return &catalog{root: root, segments: map[string][]*record.Segment{}}
+	return &catalog{root: root, segments: map[string][]*record.Segment{}, jobs: defaultDeleteJobs}
 }
 
 func (c *catalog) streamDir(stream string) string {
@@ -232,19 +236,50 @@ func (c *catalog) remove(match func(seg *record.Segment) bool) (count int, size 
 	}
 	c.mu.Unlock()
 
-	for _, seg := range removed {
-		if err := os.Remove(seg.Path); err != nil && !os.IsNotExist(err) {
-			log.Warn().Err(err).Str("path", seg.Path).Msg("[record] can't remove segment")
-			continue
-		}
-		_ = os.Remove(record.IndexPath(seg.Path))
-		_ = os.Remove(filepath.Dir(seg.Path)) // removes date dir only if empty
+	// files are removed by several workers: on network storage (NFS, SMB) every remove waits for the server
+	ok := make([]bool, len(removed))
+	var next atomic.Int64
+	var wg sync.WaitGroup
+	for range max(1, min(c.jobs, len(removed))) {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for {
+				i := int(next.Add(1) - 1)
+				if i >= len(removed) {
+					return
+				}
+				ok[i] = removeSegmentFiles(removed[i].Path)
+			}
+		}()
+	}
+	wg.Wait()
 
-		count++
-		size += seg.Size
+	dirs := map[string]bool{}
+	for i, seg := range removed {
+		if ok[i] {
+			count++
+			size += seg.Size
+			dirs[filepath.Dir(seg.Path)] = true
+		}
+	}
+
+	// date dirs are removed once, after their segments, and only if empty
+	for dir := range dirs {
+		_ = os.Remove(dir)
 	}
 
 	return
+}
+
+// removeSegmentFiles removes the segment video and its index, false if the video can't be removed
+func removeSegmentFiles(path string) bool {
+	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+		log.Warn().Err(err).Str("path", path).Msg("[record] can't remove segment")
+		return false
+	}
+	_ = os.Remove(record.IndexPath(path))
+	return true
 }
 
 // oldestFor returns the paths of the oldest segments of all streams (not recording)
