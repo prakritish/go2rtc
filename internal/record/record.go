@@ -30,6 +30,7 @@ func Init() {
 			HLSSegment   string            `yaml:"hls_segment"`
 			FFmpegJobs   int               `yaml:"ffmpeg_jobs"`
 			DeleteJobs   int               `yaml:"delete_jobs"`
+			ScanJobs     int               `yaml:"scan_jobs"`
 			MaxSize      string            `yaml:"max_size"`
 			Streams      map[string]string `yaml:"streams"`
 		} `yaml:"record"`
@@ -48,6 +49,7 @@ func Init() {
 	conf.Mod.HLSSegment = "4s"
 	conf.Mod.FFmpegJobs = 2
 	conf.Mod.DeleteJobs = defaultDeleteJobs
+	conf.Mod.ScanJobs = defaultScanJobs
 	conf.FFmpeg.Bin = "ffmpeg"
 
 	app.LoadConfig(&conf)
@@ -96,10 +98,26 @@ func Init() {
 	} else {
 		log.Warn().Msgf("[record] wrong delete_jobs: %d", conf.Mod.DeleteJobs)
 	}
-	if err = cat.scan(); err != nil {
-		log.Error().Err(err).Caller().Send()
+	if conf.Mod.ScanJobs >= 1 {
+		cat.scanJobs = conf.Mod.ScanJobs
+	} else {
+		log.Warn().Msgf("[record] wrong scan_jobs: %d", conf.Mod.ScanJobs)
 	}
 	events.load(cfg.path)
+
+	// the recording and the API don't wait for the scan, the API answers 503 for older recordings till it's done
+	go func() {
+		start := time.Now()
+		if err := cat.scan(); err != nil {
+			log.Error().Err(err).Caller().Send()
+		}
+		sizes := cat.streams()
+		var size int64
+		for _, n := range sizes {
+			size += n
+		}
+		log.Info().Msgf("[record] loaded %d streams, %d bytes in %s", len(sizes), size, time.Since(start).Round(time.Millisecond))
+	}()
 
 	streams.HandleFunc("record", playerHandler)
 

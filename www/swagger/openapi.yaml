@@ -232,6 +232,13 @@ components:
     BadRequest:
       description: A parameter is missing or wrong. The text says what is wrong.
       content: { text/plain: { example: "src is required" } }
+    RecordLoading:
+      description: |
+        go2rtc was just started and is still loading the list of the older recordings (`loading` in `GET /api/record`).
+        The recordings from before the start are not known yet. Try again after `Retry-After` seconds.
+      headers:
+        Retry-After: { schema: { type: integer, example: 5 }, description: Seconds to wait }
+      content: { text/plain: { example: "recordings are being loaded after the start, try again in a few seconds" } }
     Sources:
       description: Found sources.
       content:
@@ -365,6 +372,7 @@ components:
         retention: { type: number, description: Recordings older than this (seconds) are deleted, example: 604800 }
         max_size: { type: integer, description: When all recordings together are bigger (bytes) the oldest are deleted, example: 214748364800 }
         total_size: { type: integer, description: Disk used by all recordings (bytes) }
+        loading: { type: boolean, description: "Only after a start: the list of the older recordings is still being loaded, sizes are not complete yet." }
         sizes:
           type: object
           description: Disk used per stream (bytes).
@@ -1470,6 +1478,7 @@ paths:
         "206": { description: "Part of the video (answer to an HTTP `Range` request)." }
         "400": { $ref: "#/components/responses/BadRequest" }
         "404": { description: Nothing was recorded in this time range. }
+        "503": { $ref: "#/components/responses/RecordLoading" }
     head:
       summary: Check a recorded video without downloading it
       description: Same as GET, but returns only the headers (size, real start and end, gaps).
@@ -1485,6 +1494,7 @@ paths:
         "200": { description: Headers only. }
         "400": { $ref: "#/components/responses/BadRequest" }
         "404": { description: Nothing was recorded in this time range. }
+        "503": { $ref: "#/components/responses/RecordLoading" }
 
   /api/record/playlist.m3u8:
     get:
@@ -1527,6 +1537,7 @@ paths:
                 #EXT-X-ENDLIST
         "400": { $ref: "#/components/responses/BadRequest" }
         "404": { description: Nothing was recorded in this time range. }
+        "503": { $ref: "#/components/responses/RecordLoading" }
 
   /api/record/timeline:
     get:
@@ -1563,6 +1574,7 @@ paths:
                     type: array
                     items: { $ref: "#/components/schemas/RecordEvent" }
         "400": { $ref: "#/components/responses/BadRequest" }
+        "503": { $ref: "#/components/responses/RecordLoading" }
 
   /api/record/segments:
     get:
@@ -1585,6 +1597,7 @@ paths:
                 type: array
                 items: { $ref: "#/components/schemas/RecordSegment" }
         "400": { $ref: "#/components/responses/BadRequest" }
+        "503": { $ref: "#/components/responses/RecordLoading" }
 
   /api/record/segment.mp4:
     get:
@@ -1616,6 +1629,7 @@ paths:
               schema: { type: string, format: binary }
         "206": { description: "Part of the file (answer to an HTTP `Range` request)." }
         "404": { description: No segment with this ID (or it was already deleted). }
+        "503": { $ref: "#/components/responses/RecordLoading" }
 
   /api/record/events:
     get:

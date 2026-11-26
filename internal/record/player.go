@@ -39,6 +39,10 @@ func playerHandler(source string) (core.Producer, error) {
 		return nil, errors.New("record: start is required")
 	}
 
+	if !cat.complete(from) {
+		return nil, errors.New("record: recordings are being loaded after the start, try again in a few seconds")
+	}
+
 	return record.NewPlayer(record.PlayerOptions{
 		From: from,
 		To:   to,

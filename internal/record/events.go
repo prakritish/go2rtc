@@ -239,7 +239,8 @@ func (s *eventStore) maintain(now time.Time) {
 			}
 
 			// remove ended events that don't have any recording anymore (retention)
-			if e.End != nil {
+			// only with the complete catalog: older recordings are unknown till the scan is done
+			if e.End != nil && cat.ready() {
 				from, to := e.window(now)
 				if len(cat.list(stream, from, to)) == 0 && now.Sub(to) > time.Minute {
 					changed = true

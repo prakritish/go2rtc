@@ -29,6 +29,9 @@ func apiPlaylist(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
+	if loading(w, from) {
+		return
+	}
 
 	clip, err := getClip(src, from, to, false)
 	if err != nil {

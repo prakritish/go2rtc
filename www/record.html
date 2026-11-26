@@ -230,8 +230,24 @@
         if (to !== undefined) el.style.width = (percent(to) - percent(from)) + '%';
     }
 
+    const LOADING = 'Loading the recordings list after a restart, the older recordings will appear in a few seconds.';
+    let loadingRetry = null;
+
+    // after a restart the older recordings are loaded in the background, the API answers 503 till then
+    function retryWhileLoading() {
+        if (loadingRetry) return;
+        loadingRetry = setTimeout(() => {
+            loadingRetry = null;
+            loadStreams().then(loadTimeline).catch(showError);
+        }, 5000);
+    }
+
     async function getJSON(url) {
         const r = await fetch(url, {cache: 'no-cache'});
+        if (r.status === 503) {
+            retryWhileLoading();
+            throw Object.assign(new Error(LOADING), {loading: true});
+        }
         if (!r.ok) throw new Error(`${r.status} ${(await r.text()).trim()}`);
         return r.json();
     }
@@ -254,8 +270,16 @@
 
         const total = `total: ${formatSize(data.total_size)}` +
             (data.max_size ? ` of ${formatSize(data.max_size)}` : '') +
-            (data.retention ? ` / retention: ${+(data.retention / 86400).toFixed(2)} days` : '');
+            (data.retention ? ` / retention: ${+(data.retention / 86400).toFixed(2)} days` : '') +
+            (data.loading ? ' (loading the recordings list...)' : '');
         $('streams').insertAdjacentHTML('beforeend', `<tr><td colspan="5" class="info">${total}</td></tr>`);
+
+        if (data.loading) {
+            setStatus(LOADING);
+            retryWhileLoading();
+        } else if ($('status').innerText === LOADING) {
+            setStatus('Click the timeline to play the recording from that time.');
+        }
 
         const select = $('src');
         const current = select.value;
@@ -358,6 +382,11 @@
         const url = apiURL('video.mp4', {src, ...params});
         setStatus('loading...');
         const r = await fetch(url, {method: 'HEAD', cache: 'no-cache'});
+        if (r.status === 503) {
+            setStatus(LOADING);
+            retryWhileLoading();
+            return;
+        }
         if (!r.ok) {
             setStatus(r.status === 404 ? 'No recording at this time, click a green part of the timeline.' :
                 `Error: ${r.status} ${r.statusText}`, true);
@@ -506,7 +535,8 @@
     }
 
     function showError(err) {
-        setStatus(`Error: ${err.message}`, true);
+        if (err.loading) setStatus(err.message);
+        else setStatus(`Error: ${err.message}`, true);
     }
 
     function drawTicks() {

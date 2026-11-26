@@ -34,6 +34,7 @@ func apiRecord(w http.ResponseWriter, r *http.Request) {
 			TotalSize int64                `json:"total_size"`
 			Sizes     map[string]int64     `json:"sizes"`
 			Streams   map[string]*recorder `json:"streams"`
+			Loading   bool                 `json:"loading,omitempty"` // older recordings are being loaded after the start
 		}{
 			Path:      cfg.path,
 			Segment:   cfg.segment.Seconds(),
@@ -41,6 +42,7 @@ func apiRecord(w http.ResponseWriter, r *http.Request) {
 			MaxSize:   cfg.maxSize,
 			Sizes:     cat.streams(),
 			Streams:   make(map[string]*recorder, len(recorders)),
+			Loading:   !cat.ready(),
 		}
 		for name, rec := range recorders {
 			status.Streams[name] = rec
@@ -127,6 +129,10 @@ func apiSegments(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if loading(w, from) {
+		return
+	}
+
 	api.ResponseJSON(w, cat.list(src, from, to))
 }
 
@@ -142,7 +148,9 @@ func apiSegment(w http.ResponseWriter, r *http.Request) {
 
 	seg := cat.get(query.Get("src"), query.Get("id"))
 	if seg == nil {
-		http.Error(w, "segment not found", http.StatusNotFound)
+		if !loading(w, time.Time{}) {
+			http.Error(w, "segment not found", http.StatusNotFound)
+		}
 		return
 	}
 
@@ -239,6 +247,10 @@ func apiTimeline(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if loading(w, from) {
+		return
+	}
+
 	ranges, gaps := timeline(cat.list(src, from, to), from, to)
 
 	api.ResponseJSON(w, struct {
@@ -296,6 +308,9 @@ func apiVideo(w http.ResponseWriter, r *http.Request) {
 	src, from, to, err := parseRange(query)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if loading(w, from) {
 		return
 	}
 
@@ -567,4 +582,15 @@ func apiEvents(w http.ResponseWriter, r *http.Request) {
 	default:
 		http.Error(w, "", http.StatusMethodNotAllowed)
 	}
+}
+
+// loading answers 503 if the recordings from the time t (zero - from the beginning) are still being loaded
+// after the start. Without it, the answer would miss the older recordings.
+func loading(w http.ResponseWriter, t time.Time) bool {
+	if cat.complete(t) {
+		return false
+	}
+	w.Header().Set("Retry-After", "5")
+	http.Error(w, "recordings are being loaded after the start, try again in a few seconds", http.StatusServiceUnavailable)
+	return true
 }

@@ -9,7 +9,8 @@ Without transcoding.
 - A new segment starts on the first keyframe after `segment` duration
 - fMP4 is crash-safe: a segment is playable up to the last written keyframe even after a power loss
 - A small `.idx` sidecar file stores the time and byte offset of each keyframe for fast seeking
-- The filesystem is the only storage, the catalog is rebuilt on startup (no database)
+- The filesystem is the only storage, the catalog is rebuilt on startup (no database). The recording starts right away,
+  the older recordings are loaded in the background (see [startup](#startup))
 
 ## WebUI
 
@@ -36,6 +37,7 @@ record:
   hls_segment: 4s                   # min HLS segment duration (default 4s)
   ffmpeg_jobs: 2                    # max simultaneous FFmpeg jobs for format=mp4 and exact (default 2)
   delete_jobs: 16                   # parallel file deletions for retention and max_size (default 16)
+  scan_jobs: 16                     # parallel segment loads on startup (default 16)
   streams:
     camera1: video&audio            # all supported codecs (default)
     camera2: video                  # video only
@@ -43,9 +45,19 @@ record:
     camera4: video&audio&mode=events  # keep only the recording around events
 ```
 
+### Startup
+
+- The recording and the API start right away. The list of the older recordings is loaded from the disk in the
+  background, `scan_jobs` segments at a time (raise it for network storage with many segments).
+- Till it's loaded, `GET /api/record` has `"loading": true`, and the requests for the recordings from before the start
+  (`video.mp4`, `playlist.m3u8`, `timeline`, `segments`, `segment.mp4`, `record:` source) answer
+  `503 Service Unavailable` with `Retry-After: 5`, instead of an incomplete answer. The recordings of this run work.
+- Retention, `max_size` and the events cleanup wait for it.
+- A segment that was being recorded when go2rtc was stopped abnormally (crash, power loss) is repaired while loading.
+
 ### Retention
 
-- Checked on start and then every minute: segments that ended more than `retention` ago are deleted, then the
+- Checked when the startup loading is done and then every minute: segments that ended more than `retention` ago are deleted, then the
   oldest segments of all streams while the total size is over `max_size`. Segments being recorded are never deleted.
 - Whole segments are deleted, so a recording can stay up to a minute plus one `segment` longer than `retention`.
 - `delete_jobs` files are deleted at a time. On network storage (NFS, SMB) every deletion waits for the server,

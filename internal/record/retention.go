@@ -10,6 +10,8 @@ import (
 )
 
 func runRetention(interval time.Duration) {
+	// with an incomplete catalog the total size is wrong and old segments are unknown
+	<-cat.scanned
 	for {
 		cleanup()
 		time.Sleep(interval)
@@ -21,7 +23,9 @@ func runEventsCleanup(interval time.Duration) {
 		time.Sleep(interval)
 		now := time.Now()
 		events.maintain(now)
-		cleanupEvents(now)
+		if cat.ready() {
+			cleanupEvents(now)
+		}
 	}
 }
 

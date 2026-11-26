@@ -26,6 +26,7 @@ func fakeSegments(t *testing.T, stream string, now time.Time, age time.Duration)
 
 func setupEvents(t *testing.T) {
 	cat = newCatalog(t.TempDir())
+	require.NoError(t, cat.scan()) // empty, the catalog is complete
 	events = &eventStore{items: map[string][]*Event{}}
 	cfg.pre = 10 * time.Second
 	cfg.post = 10 * time.Second

@@ -14,25 +14,55 @@ import (
 
 // catalog - in-memory list of all segments, sorted by start time for each stream.
 // It is rebuilt from the filesystem on startup, so the filesystem is the source of truth.
+// The scan runs in the background: the recording starts right away and its new segments are
+// added while the old ones are still being loaded.
 type catalog struct {
 	root     string
 	segments map[string][]*record.Segment
 	mu       sync.RWMutex
 	jobs     int // parallel file removals
+	scanJobs int // parallel segment loads on scan
+
+	since    time.Time     // catalog creation: segments of this run start after it
+	scanned  chan struct{} // closed when the scan is done
+	scanOnce sync.Once
 }
 
 const defaultDeleteJobs = 16
+const defaultScanJobs = 16
 
 func newCatalog(root string) *catalog {
-	return &catalog{root: root, segments: map[string][]*record.Segment{}, jobs: defaultDeleteJobs}
+	return &catalog{
+		root: root, segments: map[string][]*record.Segment{},
+		jobs: defaultDeleteJobs, scanJobs: defaultScanJobs,
+		since: time.Now(), scanned: make(chan struct{}),
+	}
+}
+
+// ready - the scan is done, the catalog has all the segments
+func (c *catalog) ready() bool {
+	select {
+	case <-c.scanned:
+		return true
+	default:
+		return false
+	}
+}
+
+// complete - the catalog has all the segments from the time t (zero - from the beginning)
+func (c *catalog) complete(t time.Time) bool {
+	return c.ready() || !t.IsZero() && !t.Before(c.since)
 }
 
 func (c *catalog) streamDir(stream string) string {
 	return filepath.Join(c.root, record.EscapeName(stream))
 }
 
-// scan loads all segments from the filesystem
+// scan loads all segments from the filesystem and adds them to the catalog.
+// It's safe while recording: the segments already in the catalog are kept as they are.
 func (c *catalog) scan() error {
+	defer c.scanOnce.Do(func() { close(c.scanned) })
+
 	dirs, err := os.ReadDir(c.root)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -41,7 +71,8 @@ func (c *catalog) scan() error {
 		return err
 	}
 
-	segments := map[string][]*record.Segment{}
+	type file struct{ stream, streamDir, path string }
+	var files []file
 
 	for _, dir := range dirs {
 		// skip files and service dirs (.tmp), escaped stream names never start with a dot
@@ -56,26 +87,59 @@ func (c *catalog) scan() error {
 
 		streamDir := filepath.Join(c.root, dir.Name())
 		paths, _ := filepath.Glob(filepath.Join(streamDir, "*", "*"+record.ExtVideo))
-
 		for _, path := range paths {
-			if seg := loadSegment(stream, streamDir, path); seg != nil {
-				segments[stream] = append(segments[stream], seg)
-			}
+			files = append(files, file{stream, streamDir, path})
 		}
 	}
 
-	for _, items := range segments {
-		sortSegments(items)
+	// segments are loaded by several workers: on network storage every file waits for the server
+	loaded := make([]*record.Segment, len(files))
+	var next atomic.Int64
+	var wg sync.WaitGroup
+	for range max(1, min(c.scanJobs, len(files))) {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for {
+				i := int(next.Add(1) - 1)
+				if i >= len(files) {
+					return
+				}
+				loaded[i] = loadSegment(files[i].stream, files[i].streamDir, files[i].path, c.since)
+			}
+		}()
 	}
+	wg.Wait()
 
 	c.mu.Lock()
-	c.segments = segments
-	c.mu.Unlock()
+	defer c.mu.Unlock()
+
+	known := map[string]bool{}
+	for _, items := range c.segments {
+		for _, seg := range items {
+			known[seg.Path] = true
+		}
+	}
+
+	changed := map[string]bool{}
+	for _, seg := range loaded {
+		// segments of this run are already in the catalog and are more up to date
+		if seg == nil || known[seg.Path] {
+			continue
+		}
+		c.segments[seg.Stream] = append(c.segments[seg.Stream], seg)
+		changed[seg.Stream] = true
+	}
+	for stream := range changed {
+		sortSegments(c.segments[stream])
+	}
 
 	return nil
 }
 
-func loadSegment(stream, streamDir, path string) *record.Segment {
+// loadSegment reads the segment info from the file and its index. The segments of this run
+// (starting after since) that are not finished are skipped: they are being recorded right now.
+func loadSegment(stream, streamDir, path string, since time.Time) *record.Segment {
 	start, ok := record.ParseSegmentID(path)
 	if !ok {
 		return nil
@@ -105,8 +169,12 @@ func loadSegment(stream, streamDir, path string) *record.Segment {
 		seg.Start = seg.Start.Add(record.IndexStart(entries)) // corrected start time
 	}
 
+	if !closed && !start.Before(since) {
+		return nil
+	}
+
 	// index without the end entry or without index (crash): rebuild it from the file,
-	// it's safe on startup, because nothing is recorded yet
+	// it's safe, because it was recorded before this run
 	if !closed {
 		if duration, err := record.RepairSegment(path); err == nil {
 			log.Info().Str("path", path).Msg("[record] segment repaired")
